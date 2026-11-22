@@ -1,4 +1,8 @@
-"""Plotly chart builders — receive ready-made data tables, return figures."""
+"""Plotly chart builders — receive ready-made data tables, return figures.
+
+Colours are chosen to be readable on both light and dark Streamlit themes:
+the chart background is transparent and Streamlit supplies the text colour.
+"""
 
 import math
 
@@ -6,12 +10,10 @@ import networkx as nx
 import pandas as pd
 import plotly.graph_objects as go
 
-# Dark-surface categorical colour palette (fixed order so the same protocol
-# always gets the same colour across charts).
+# Same order every time, so one protocol keeps one colour across charts.
 SERIES = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#0ca30c", "#9085e9", "#e66767"]
-INK = "#f0efec"       # bright text
-MUTED = "#c3c2b7"     # dimmed text / axis labels
-GRID = "rgba(255,255,255,0.08)"
+GRID = "rgba(128,128,128,0.25)"      # grey that works on light and dark
+NO_COLOUR = "rgba(0,0,0,0)"
 
 # Applied to every chart — no toolbar clutter for beginners.
 CHART_CONFIG = {
@@ -21,16 +23,13 @@ CHART_CONFIG = {
 
 
 def _style(fig, height=340, legend=False):
-    """Apply a consistent dark theme to any Plotly figure."""
+    """Apply the same simple look to every Plotly figure."""
     fig.update_layout(
-        template="plotly_dark",
         height=height,
         showlegend=legend,
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color=MUTED, size=12),
-        margin=dict(l=10, r=50, t=30, b=10),
-        hoverlabel=dict(bgcolor="#1a1a19", font_color=INK),
+        paper_bgcolor=NO_COLOUR,
+        plot_bgcolor=NO_COLOUR,
+        margin=dict(l=10, r=50, t=40, b=10),
     )
     fig.update_xaxes(gridcolor=GRID, zerolinecolor=GRID)
     fig.update_yaxes(gridcolor=GRID, zerolinecolor=GRID)
@@ -50,25 +49,30 @@ def bar_h(df, label, value, title="", color=SERIES[0]):
         cliponaxis=False,
         hovertemplate="%{y}: %{x:,}<extra></extra>",
     ))
-    fig.update_layout(title=dict(text=title, font=dict(color=INK, size=14)))
+    fig.update_layout(title=dict(text=title, font=dict(size=14)))
     fig.update_yaxes(automargin=True)
     return _style(fig, height=max(260, 34 * len(d) + 80))
 
 
 def protocol_donut(df, title):
-    """Donut chart showing the share of packets for one protocol layer."""
+    """
+    Donut chart showing the share of packets for one protocol layer.
+    The labels go in a legend under the chart so long names stay readable.
+    """
     fig = go.Figure(go.Pie(
         labels=df["protocol"],
         values=df["packets"],
         hole=0.55,
         sort=False,
-        marker=dict(colors=SERIES[: len(df)], line=dict(color="#1a1a19", width=2)),
-        textinfo="label+percent",
-        textfont=dict(color=INK),
-        hovertemplate="%{label}: %{value:,} packets (%{percent})<extra></extra>",
+        marker=dict(colors=SERIES[: len(df)], line=dict(color=NO_COLOUR, width=2)),
+        textinfo="percent",
+        hovertemplate="%{label}<br>%{value:,} packets (%{percent})<extra></extra>",
     ))
-    fig.update_layout(title=dict(text=title, font=dict(color=INK, size=14)))
-    return _style(fig, height=320)
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=14)),
+        legend=dict(orientation="h", y=-0.05, yanchor="top"),
+    )
+    return _style(fig, height=380, legend=True)
 
 
 def time_series(tbl, y, width):
@@ -102,116 +106,99 @@ def histogram(tbl):
     return _style(fig)
 
 
-def comm_map(conv, max_nodes=25, highlight_nodes=None):
-    """Network graph — IPs as nodes, conversations as edges, edge width = bytes.
+def _short(ip):
+    """Shorten very long IPv6 addresses for on-screen labels (hover shows the full address)."""
+    return ip if len(ip) < 22 else ip[:10] + "…" + ip[-8:]
 
-    highlight_nodes: set of IP strings to show in green (used for the local device).
+
+def comm_map(flows, top_n=12, highlight_nodes=None):
+    """
+    Directed communication map.
+
+    flows: table from analysis.directed_flows (src, dst, packets, bytes, protocols).
+    Draws the busiest `top_n` sender -> receiver connections:
+      - dots are IP addresses (size = bytes sent + received in the connections shown)
+      - arrows go from sender to receiver (thickness = bytes)
     Returns None if there is nothing to draw.
     """
-    if conv.empty:
+    if flows.empty:
         return None
-
     highlight_nodes = highlight_nodes or set()
+    shown = flows.head(top_n)
 
-    # Count total bytes per IP address (across all conversations).
-    vol = {}
-    for row in conv.itertuples():
-        vol[row.a] = vol.get(row.a, 0) + row.bytes
-        vol[row.b] = vol.get(row.b, 0) + row.bytes
-
-    # Keep only the top max_nodes endpoints to avoid a cluttered graph.
-    keep = set(sorted(vol, key=vol.get, reverse=True)[:max_nodes])
-    sub = conv[conv["a"].isin(keep) & conv["b"].isin(keep)]
+    # Bytes per IP address, counting only the connections that are drawn.
+    volume = {}
+    for row in shown.itertuples():
+        volume[row.src] = volume.get(row.src, 0) + row.bytes
+        volume[row.dst] = volume.get(row.dst, 0) + row.bytes
 
     g = nx.Graph()
-    for row in sub.itertuples():
-        g.add_edge(row.a, row.b, weight=row.bytes)
+    g.add_nodes_from(volume)
+    g.add_edges_from(zip(shown["src"], shown["dst"]))
+    pos = nx.spring_layout(g, seed=7, k=1.5 / math.sqrt(len(g)))
 
-    if g.number_of_nodes() == 0:
-        return None
-
-    # Layout each connected group of nodes separately so isolated clusters
-    # don't overlap the main group.
-    comps = sorted(nx.connected_components(g), key=len, reverse=True)
-    pos = {}
-    for i, comp in enumerate(comps):
-        sg = g.subgraph(comp)
-        if len(comp) > 1:
-            local_pos = nx.spring_layout(sg, seed=7, k=1.0 / math.sqrt(max(len(comp), 1)))
-        else:
-            local_pos = {next(iter(comp)): (0.0, 0.0)}
-
-        scale = 1.0 if i == 0 else 0.25
-        cx = 0.0 if i == 0 else 2.0 * math.cos(2 * math.pi * i / max(len(comps) - 1, 1))
-        cy = 0.0 if i == 0 else 2.0 * math.sin(2 * math.pi * i / max(len(comps) - 1, 1))
-
-        for node, (x, y) in local_pos.items():
-            pos[node] = (cx + scale * x, cy + scale * y)
-
-    max_weight = max(d["weight"] for *_, d in g.edges(data=True))
     fig = go.Figure()
+    most_bytes = shown["bytes"].max()
+    pairs = set(zip(shown["src"], shown["dst"]))
 
-    # Draw edges (one trace per edge so hover shows the pair and byte count).
-    for a, b, d in g.edges(data=True):
-        fig.add_trace(go.Scatter(
-            x=[pos[a][0], pos[b][0]],
-            y=[pos[a][1], pos[b][1]],
-            mode="lines",
-            line=dict(width=1 + 7 * d["weight"] / max_weight, color="rgba(144,133,233,0.55)"),
-            hoverinfo="text",
-            text=f"{a} ↔ {b}<br>{d['weight']:,} bytes",
-        ))
+    # Arrows: one annotation per connection (annotations are not chart traces).
+    mid_x, mid_y, mid_text = [], [], []
+    for row in shown.itertuples():
+        x0, y0 = pos[row.src]
+        x1, y1 = pos[row.dst]
+        dx, dy = x1 - x0, y1 - y0
+        length = math.hypot(dx, dy) or 1
+        ux, uy = dx / length, dy / length
+        # Stop the arrow just before the dots; shift it sideways if the
+        # reverse direction is also drawn so the two arrows do not overlap.
+        side = 0.02 if (row.dst, row.src) in pairs else 0
+        sx = x0 + ux * 0.06 - uy * side
+        sy = y0 + uy * 0.06 + ux * side
+        ex = x1 - ux * 0.08 - uy * side
+        ey = y1 - uy * 0.08 + ux * side
+        fig.add_annotation(
+            x=ex, y=ey, ax=sx, ay=sy, xref="x", yref="y", axref="x", ayref="y",
+            showarrow=True, arrowhead=3, arrowsize=1.1,
+            arrowwidth=1 + 5 * row.bytes / most_bytes,
+            arrowcolor="rgba(144,133,233,0.8)",
+        )
+        mid_x.append((sx + ex) / 2)
+        mid_y.append((sy + ey) / 2)
+        protocols = row.protocols.split(", ")
+        shown_protocols = ", ".join(protocols[:4]) + (f" +{len(protocols) - 4} more" if len(protocols) > 4 else "")
+        mid_text.append(
+            f"{row.src} → {row.dst}<br>{row.packets:,} packets · {row.bytes:,} bytes"
+            f"<br>Protocols seen: {shown_protocols}"
+        )
 
-    nodes = list(g.nodes)
-    max_vol = max(vol[n] for n in nodes)
-
-    # Remote nodes (blue circles)
-    other_nodes = [n for n in nodes if n not in highlight_nodes]
-    if other_nodes:
-        fig.add_trace(go.Scatter(
-            x=[pos[n][0] for n in other_nodes],
-            y=[pos[n][1] for n in other_nodes],
-            mode="markers",
-            marker=dict(
-                size=[10 + 26 * vol[n] / max_vol for n in other_nodes],
-                color=SERIES[0],
-                line=dict(color="#1a1a19", width=2),
-            ),
-            text=[f"{n}<br>{vol[n]:,} bytes" for n in other_nodes],
-            hoverinfo="text",
-            name="Remote device",
-        ))
-
-    # Highlighted nodes — the user's local device (green star)
-    local_nodes = [n for n in nodes if n in highlight_nodes]
-    if local_nodes:
-        fig.add_trace(go.Scatter(
-            x=[pos[n][0] for n in local_nodes],
-            y=[pos[n][1] for n in local_nodes],
-            mode="markers",
-            marker=dict(
-                size=[14 + 26 * vol[n] / max_vol for n in local_nodes],
-                color="#199e70",
-                symbol="star",
-                line=dict(color="#1a1a19", width=2),
-            ),
-            text=[f"★ YOUR DEVICE — {n}<br>{vol[n]:,} bytes" for n in local_nodes],
-            hoverinfo="text",
-            name="Your device",
-        ))
-
-    # Label the single busiest endpoint.
-    top = sorted(nodes, key=vol.get, reverse=True)[:1]
+    # One invisible trace so hovering over an arrow shows its details.
     fig.add_trace(go.Scatter(
-        x=[pos[n][0] for n in top],
-        y=[pos[n][1] for n in top],
-        mode="text",
-        text=[n if len(n) < 22 else n[:10] + "…" + n[-8:] for n in top],
-        textposition="bottom center",
-        textfont=dict(color=INK, size=11),
-        hoverinfo="skip",
+        x=mid_x, y=mid_y, mode="markers",
+        marker=dict(size=16, color=NO_COLOUR),
+        text=mid_text, hoverinfo="text", showlegend=False,
     ))
 
-    fig.update_xaxes(visible=False)
-    fig.update_yaxes(visible=False)
-    return _style(fig, height=520, legend=True)
+    # IP address dots: one trace for the likely capture device, one for the rest.
+    biggest = max(volume.values())
+    labelled = set(sorted(volume, key=volume.get, reverse=True)[:12])   # keep the map readable
+    for is_device, name, colour in [(False, "Other IP address", SERIES[0]),
+                                    (True, "Likely your device (estimate)", SERIES[2])]:
+        ips = [ip for ip in volume if (ip in highlight_nodes) == is_device]
+        if not ips:
+            continue
+        fig.add_trace(go.Scatter(
+            x=[pos[ip][0] for ip in ips], y=[pos[ip][1] for ip in ips],
+            mode="markers+text",
+            marker=dict(size=[12 + 26 * volume[ip] / biggest for ip in ips],
+                        color=colour, line=dict(color="white", width=1)),
+            text=[_short(ip) if ip in labelled else "" for ip in ips],
+            textposition="top center",
+            customdata=[f"{ip}<br>{volume[ip]:,} bytes in the connections shown" for ip in ips],
+            hovertemplate="%{customdata}<extra></extra>",
+            name=name,
+        ))
+
+    fig.update_xaxes(visible=False, range=[-1.4, 1.4])
+    fig.update_yaxes(visible=False, range=[-1.4, 1.4], scaleanchor="x")
+    fig.update_layout(legend=dict(orientation="h", y=-0.02, yanchor="top"))
+    return _style(fig, height=560, legend=True)

@@ -1,61 +1,66 @@
-"""Tests for parsing, aggregation, detectors, exports.
+"""Tests for parsing, aggregation, rules and exports.
 
-The first group checks the REAL capture against the numbers Wireshark showed for the
-same file. The rest use small synthetic captures so we know the exact right answers.
+Most tests use the small synthetic capture from conftest.py, so they run on a fresh
+clone. The last group compares NetScope with Wireshark on the real capture; it is
+skipped when that private file is not present.
 Run:  python -m pytest -q
 """
 import os
 
 import pandas as pd
 import pytest
-from scapy.all import DNS, DNSQR, DNSRR, IP, TCP, UDP, Ether, wrpcap
+from scapy.all import DNS, DNSQR, IP, TCP, UDP, Ether, wrpcap
 
 import analysis as A
+from tests.conftest import EXPECTED
 from parser import CaptureError, parse_capture
 import rules
 from pdf_report import build_pdf
 
-REAL = os.path.join(os.path.dirname(__file__), "..", "captures", "netscope_first_capture.pcapng")
 
+# ---- synthetic capture: exact known answers ----
+def test_total_packets(cap):
+    assert len(cap.packets) == EXPECTED["total"] and cap.skipped == 0
 
-@pytest.fixture(scope="module")
-def real():
-    return parse_capture(REAL)
+def test_protocol_counts(cap):
+    df = cap.packets
+    assert (df["transport"] == "TCP").sum() == EXPECTED["tcp"]
+    assert (df["transport"] == "UDP").sum() == EXPECTED["udp"]
+    assert (df["transport"] == "ICMP").sum() == EXPECTED["icmp"]
+    assert (df["network"] == "ARP").sum() == EXPECTED["arp"]
+    assert (df["app"] == "DNS").sum() == EXPECTED["dns"] and len(cap.dns) == EXPECTED["dns"]
+    assert (df["app"] == "TLS").sum() == EXPECTED["tls"]
+    assert (df["app"] == "HTTP").sum() == EXPECTED["http"]
 
-
-# ---- real capture vs Wireshark display filters ----
-def test_total_packets_matches_wireshark(real):
-    assert len(real.packets) == 2794 and real.skipped == 0
-
-def test_tcp_matches_wireshark(real):
-    assert (real.packets["transport"] == "TCP").sum() == 2248
-
-def test_icmp_matches_wireshark(real):
-    assert (real.packets["transport"] == "ICMP").sum() == 25
-
-def test_dns_matches_wireshark(real):
-    assert (real.packets["app"] == "DNS").sum() == 128
-    assert len(real.dns) == 128
-
-def test_ipv4_and_ipv6_both_extracted(real):
-    nets = set(real.packets["network"])
-    assert {"IPv4", "IPv6", "ARP"} <= nets
-    v6 = real.packets[real.packets["network"] == "IPv6"]["src"]
+def test_ipv4_and_ipv6_both_extracted(cap):
+    assert {"IPv4", "IPv6", "ARP"} <= set(cap.packets["network"])
+    v6 = cap.packets[cap.packets["network"] == "IPv6"]["src"]
     assert v6.str.contains(":").all()
 
-def test_layers_each_sum_to_100(real):
-    for t in A.layer_tables(real.packets).values():
-        assert t["packets"].sum() == 2794
+def test_layers_each_sum_to_100(cap):
+    for t in A.layer_tables(cap.packets).values():
+        assert t["packets"].sum() == EXPECTED["total"]
         assert abs(t["percent"].sum() - 100) < 0.1
 
-def test_dns_queries_have_types_and_responses(real):
-    s = A.dns_summary(real.dns)
-    assert s["queries"] == 64 and s["responses"] == 64
-    assert set(A.dns_types(real.dns)["type"]) >= {"A", "AAAA"}
+def test_dns_summary(cap):
+    s = A.dns_summary(cap.dns)
+    assert s["queries"] == 6 and s["responses"] == 6
+    assert s["failed"] == 2 and s["unanswered"] == 0
+    assert set(A.dns_types(cap.dns)["type"]) == {"A"}
 
-def test_quiet_seconds_are_zero_not_missing(real):
-    tbl, _ = A.traffic_over_time(real.packets)
-    assert tbl["packets"].sum() == 2794 and tbl["packets"].notna().all()
+def test_quiet_seconds_are_zero_not_missing(cap):
+    tbl, _ = A.traffic_over_time(cap.packets)
+    assert tbl["packets"].sum() == EXPECTED["total"] and tbl["packets"].notna().all()
+
+def test_overview_numbers(cap):
+    ov = A.overview(cap.packets)
+    assert ov["packets"] == EXPECTED["total"]
+    assert ov["duration"] == pytest.approx(EXPECTED["total"] - 1)
+    assert ov["unique_ips"] == 5      # 10.0.0.5, .9, .1 and the two IPv6 addresses
+
+def test_likely_capture_host(cap):
+    hosts = rules.likely_capture_hosts(cap.packets)
+    assert "10.0.0.5" in hosts          # the IPv4 address present in every IPv4 packet
 
 
 # ---- synthetic captures ----
@@ -105,11 +110,11 @@ def test_repeated_dns_detected_and_parsed(tmp_path):
     assert any("repeated DNS" in a.title for a in rules.run_all(cap.packets, cap.dns))
 
 
-def test_narrative_generates_factual_observations(real):
-    ov = A.overview(real.packets)
-    lines = A.narrative(real.packets, real.dns, ov)
+def test_narrative_generates_factual_observations(cap):
+    ov = A.overview(cap.packets)
+    lines = A.narrative(cap.packets, cap.dns, ov)
     assert len(lines) >= 3
-    assert any("2,794 packets" in l for l in lines)
+    assert any(f"{EXPECTED['total']} packets" in l for l in lines)
     assert any("TCP" in l for l in lines)
     assert any("DNS" in l for l in lines)
 
@@ -142,12 +147,30 @@ def test_max_packets_flags_truncation(tmp_path):
 
 
 # ---- exports ----
-def test_csv_export_roundtrip(real, tmp_path):
+def test_csv_export_roundtrip(cap, tmp_path):
     p = tmp_path / "o.csv"
-    real.packets.to_csv(p, index=False)
+    cap.packets.to_csv(p, index=False)
     back = pd.read_csv(p)
-    assert len(back) == 2794 and "src" in back.columns
+    assert len(back) == EXPECTED["total"] and "src" in back.columns
 
-def test_pdf_generates(real):
-    pdf = build_pdf(real, rules.run_all(real.packets, real.dns))
+def test_pdf_generates(cap):
+    pdf = build_pdf(cap, rules.run_all(cap.packets, cap.dns))
     assert pdf[:4] == b"%PDF" and len(pdf) > 5000
+
+
+# ---- optional: parity with Wireshark on the private real capture ----
+REAL = os.path.join(os.path.dirname(__file__), "..", "captures", "netscope_first_capture.pcapng")
+needs_real = pytest.mark.skipif(not os.path.exists(REAL), reason="private reference capture not present")
+
+
+@needs_real
+def test_real_capture_matches_wireshark():
+    real = parse_capture(REAL)
+    df = real.packets
+    assert len(df) == 2794 and real.skipped == 0
+    assert (df["transport"] == "TCP").sum() == 2248
+    assert (df["transport"] == "ICMP").sum() == 25
+    assert (df["app"] == "DNS").sum() == 128 and len(real.dns) == 128
+    assert {"IPv4", "IPv6", "ARP"} <= set(df["network"])
+    s = A.dns_summary(real.dns)
+    assert s["queries"] == 64 and s["responses"] == 64

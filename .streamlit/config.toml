@@ -1,9 +1,8 @@
+# No "base" and no background/text colours on purpose:
+# Streamlit then follows the viewer's light or dark setting, and every
+# colour we do not set stays readable in both themes.
 [theme]
-base = "dark"
 primaryColor = "#3987e5"
-backgroundColor = "#0e1117"
-secondaryBackgroundColor = "#161b22"
-textColor = "#f0efec"
 
 [server]
 maxUploadSize = 500

@@ -4,6 +4,7 @@ Run:  streamlit run app.py
 Data flow: upload → parser.py → analysis.py / rules.py → charts.py → this file.
 """
 
+import hashlib
 import os
 import tempfile
 
@@ -16,38 +17,54 @@ from parser import CaptureError, parse_capture, MAX_PACKETS
 import rules
 from pdf_report import build_pdf
 
-# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="NetScope — Network Traffic Analyzer",
     page_icon="📡",
     layout="wide",
 )
 
-# ── Global CSS ────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-[data-testid="stMetric"]{
-  background:#1a1a19;
-  border:1px solid rgba(255,255,255,.08);
-  border-radius:10px;
-  padding:14px 16px
-}
-[data-testid="stMetricLabel"]{color:#c3c2b7}
-[data-testid="stMetricValue"]{font-size:1.6rem !important}
-h1,h2,h3{letter-spacing:-.01em}
-.note{color:#c3c2b7;font-size:.85rem;margin-top:.2rem}
-.device-card{
-  background:linear-gradient(135deg,#0d2a1a,#122414);
-  border:1px solid #199e70;
-  border-radius:10px;
-  padding:14px 18px;
-}
-</style>
-""", unsafe_allow_html=True)
+# The eight pages, in sidebar order (plain-English names).
+PAGES = [
+    "Overview",
+    "Types of Traffic",
+    "Devices & Activity",
+    "Website Lookups",
+    "Browse Packets",
+    "Unusual Activity",
+    "Who Talks to Whom",
+    "Download Reports",
+]
 
 
-def _chart(fig, **kw):
-    st.plotly_chart(fig, width='stretch', config=charts.CHART_CONFIG, **kw)
+# ── Small helpers used by several pages ───────────────────────────────────────
+def show_chart(fig):
+    st.plotly_chart(fig, width="stretch", config=charts.CHART_CONFIG)
+
+
+def page_header(title, description, technical=None):
+    """Page title, a one-sentence explanation and (optionally) the technical name."""
+    st.header(title)
+    text = description if technical is None else f"{description}  \nTechnical name: *{technical}*"
+    st.caption(text)
+
+
+def show_ip(label, ip):
+    """A labelled IP address in a code box (the code box has a copy button)."""
+    st.caption(label)
+    st.code(ip, language=None)
+
+
+def metric_card(column, label, value, help_text):
+    with column:
+        with st.container(border=True):
+            st.metric(label, value, help=help_text)
+
+
+def friendly_table(table):
+    """Replace the 'protocol' column of a counts table with friendly name + technical name."""
+    out = table.copy()
+    out["protocol"] = out["protocol"].map(A.protocol_label)
+    return out
 
 
 @st.cache_data(show_spinner=False, max_entries=2)
@@ -61,6 +78,8 @@ def load(file_id, _data, name):
     finally:
         os.remove(path)
     cap.file_name, cap.file_size = name, len(_data)
+    # A short fingerprint of the file contents: it identifies THIS capture.
+    cap.fingerprint = hashlib.sha256(_data).hexdigest()[:16]
     return cap
 
 
@@ -68,77 +87,56 @@ def load(file_id, _data, name):
 with st.sidebar:
     st.title("📡 NetScope")
     st.caption("Network Traffic Analyzer")
-    st.divider()
 
-    page = st.radio("Navigate", [
-        "Overview", "Protocol Analysis", "Traffic Analysis", "DNS Analysis",
-        "Packet Explorer", "Security Insights", "Communication Map", "Reports",
-    ])
+    page = st.radio("Go to", PAGES)
 
-    st.divider()
     upload = st.file_uploader(
-        "📂 Upload a capture",
+        "Upload a capture",
         type=["pcap", "pcapng"],
-        help="Drag and drop or click to browse. Analysed in-memory; never saved to disk.",
+        help="Drag and drop or click to browse. The file is analysed in memory and never saved.",
     )
-    st.caption("`.pcap` or `.pcapng` files exported from Wireshark.")
-    st.caption("⚠ Only analyse traffic you are authorised to capture.")
+    st.caption("`.pcap` or `.pcapng` files saved from Wireshark. "
+               "Only analyse traffic you are allowed to capture.")
 
-    st.divider()
-    with st.expander("📖 Learn the basics"):
-        st.markdown("**Key networking concepts** — tap any to read more.")
-        for title, body in [
-            ("📦 Packet",
-             "Data sent over a network is split into small chunks called **packets**. "
-             "Each packet carries a source address, destination address, and a payload."),
-            ("🌐 IP Address",
-             "A unique number (like 192.168.1.5) that identifies a device on a network. "
-             "IPv4 uses 32-bit numbers; IPv6 uses 128-bit numbers."),
-            ("🔗 TCP", A.PROTOCOL_EXPLANATIONS["TCP"]),
-            ("💨 UDP", A.PROTOCOL_EXPLANATIONS["UDP"]),
-            ("🔍 DNS", A.PROTOCOL_EXPLANATIONS["DNS"]),
-            ("🚪 Port",
-             "A port is a number (0–65535) that identifies which **application** on a device "
-             "should receive data. Port 80 = HTTP, 443 = HTTPS, 53 = DNS."),
-            ("🔒 TLS", A.PROTOCOL_EXPLANATIONS["TLS"]),
-            ("📡 ARP", A.PROTOCOL_EXPLANATIONS["ARP"]),
-            ("📣 ICMP", A.PROTOCOL_EXPLANATIONS["ICMP"]),
-        ]:
-            with st.expander(title, expanded=False):
-                st.write(body)
+    with st.expander("Learn the basics"):
+        st.markdown(
+            "**Packet** — Data sent over a network is split into small chunks called packets. "
+            "Each one carries a sender address, a receiver address and some data.\n\n"
+            "**IP address** — A number like `192.168.1.5` that identifies a device on a network.\n\n"
+            "**Port** — A number that tells a device which program should receive the data "
+            "(443 = secure web, 53 = website lookups)."
+        )
+        for proto in ["TCP", "UDP", "DNS", "TLS", "ARP", "ICMP"]:
+            st.markdown(f"**{A.friendly_name(proto)}** ({proto}) — {A.protocol_description(proto)}")
 
 
-# ── App title ──────────────────────────────────────────────────────────────────
-st.title("NetScope — Network Traffic Analyzer")
-
-# ── Empty state ────────────────────────────────────────────────────────────────
+# ── Empty state ───────────────────────────────────────────────────────────────
 if upload is None:
-    st.markdown("""
-### Welcome 👋
-
-NetScope turns a Wireshark capture file into an easy-to-read visual dashboard.
-
-**To get started:**
-1. Open **Wireshark**, start a capture on your network interface, then stop it after a few seconds.
-2. In Wireshark: **File → Save As** → choose `.pcapng` format.
-3. Click **📂 Upload a capture** in the left sidebar and select your file.
-
-All eight dashboard pages will unlock automatically.
-
----
-**Don't have a capture yet?**  
-Use Wireshark to record some traffic from your own computer — even a few seconds is enough to explore all the features.
-""")
+    st.title("NetScope")
+    st.subheader("Turn a Wireshark capture into easy-to-read charts")
+    st.markdown(
+        "Wireshark **records** network traffic. NetScope **explains** it. "
+        "Upload a saved capture file and NetScope will show what happened on the network, "
+        "in plain English."
+    )
+    with st.container(border=True):
+        st.markdown(
+            "**How to get started**\n\n"
+            "1. Open **Wireshark**, start capturing on your network connection, then stop after a few seconds.\n"
+            "2. Choose **File → Save As** and save it as `.pcapng`.\n"
+            "3. Upload that file using **Upload a capture** in the sidebar (on a phone, open the "
+            "sidebar with the arrow at the top left)."
+        )
+    st.info("All eight pages unlock as soon as a file is uploaded. NetScope does not capture traffic itself "
+            "and cannot read encrypted (HTTPS) content.")
     with st.expander("What is Wireshark?"):
         st.write(
-            "Wireshark is a free, open-source tool that lets you record all network packets "
-            "that pass through your computer's network interface. NetScope reads those recorded "
-            "files and turns them into charts and summaries. Wireshark is available at "
-            "[wireshark.org](https://www.wireshark.org)."
+            "Wireshark is a free tool that records the packets passing through your computer's "
+            "network connection. Download it from [wireshark.org](https://www.wireshark.org)."
         )
     st.stop()
 
-# ── Load capture ───────────────────────────────────────────────────────────────
+# ── Load capture ──────────────────────────────────────────────────────────────
 try:
     with st.spinner("Reading capture… large files can take a moment."):
         cap = load(upload.file_id, upload.getvalue(), upload.name)
@@ -155,10 +153,8 @@ alerts = rules.run_all(df, dns)
 capture_hosts = rules.likely_capture_hosts(df)
 
 st.caption(
-    f"Capture: **{cap.file_name}** · "
-    f"{ov['packets']:,} packets · "
-    f"{A.format_bytes(ov['bytes'])} · "
-    f"All figures come from this file only."
+    f"Capture: **{cap.file_name}** · {ov['packets']:,} packets · "
+    f"{A.format_bytes(ov['bytes'])} · All figures come from this file only."
 )
 for n in cap.notes:
     st.warning(n)
@@ -168,338 +164,235 @@ for n in cap.notes:
 # OVERVIEW
 # ═══════════════════════════════════════════════════════════════════════════════
 if page == "Overview":
-    st.header("What happened in this network capture?")
+    page_header("Overview", "The big picture of what happened in this capture.")
 
-    # Likely capture device (green card)
-    if capture_hosts:
-        host_str = ", ".join(capture_hosts)
-        st.markdown(f"""
-<div class="device-card">
-  <div style="font-size:.75rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:#c3c2b7;margin-bottom:4px">
-    🖥 Likely Your Device (estimate)
-  </div>
-  <div style="font-size:1.1rem;font-weight:600;color:#34c77b;margin:4px 0">{host_str}</div>
-  <div style="font-size:.85rem;color:#c3c2b7;margin-top:4px">
-    This IP address appears in ≥90% of all packets — a strong sign it belongs to
-    the computer that recorded the capture. It is excluded from "high traffic" alerts.
-    This is an estimate based on packet frequency, not a confirmed identity.
-  </div>
-</div>
-""", unsafe_allow_html=True)
-        st.write("")
-
-    # Key numbers
-    c0, c1, c2, c3, c4 = st.columns(5)
-    c0.metric("📦 Total Packets Captured", f"{ov['packets']:,}",
-              help="The number of individual packets found in your capture file.")
-    c1.metric("📊 Total Data Transferred", A.format_bytes(ov["bytes"]),
-              help="Combined size of all captured packet frames (wire bytes).")
-    c2.metric("⏱ Capture Duration", f"{ov['duration']:.1f} s",
-              help="Time from the first to the last packet in the capture.")
-    c3.metric("🌐 Unique Sender Addresses", ov["unique_src"],
-              help="Number of unique IP addresses that sent packets.")
-    c4.metric("📍 Unique Receiver Addresses", ov["unique_dst"],
-              help="Number of unique IP addresses that received packets.")
-
-    # Auto-generated observations
-    st.subheader("Key observations")
-    st.caption("These statements are generated from your actual capture — nothing is guessed.")
-    for sentence in A.narrative(df, dns, ov):
-        st.markdown(f"- {sentence}")
-
-    # Charts
-    st.divider()
-    left, right = st.columns(2)
-    layers = A.layer_tables(df)
-    with left:
-        st.subheader("Types of Network Traffic")
-        st.caption("How packets were carried — TCP for reliable delivery, UDP for speed.")
-        _chart(charts.protocol_donut(layers["Transport layer"], "Transport layer (share of packets)"))
-    with right:
-        st.subheader("Most-Used Services (Destination Ports)")
-        st.caption("Ports identify which service on the destination device received the data.")
-        top_ports_df = A.top_ports(df, "dport", 8).copy()
-        top_ports_df["port"] = top_ports_df["port"].apply(A.label_port)
-        _chart(charts.bar_h(top_ports_df, "port", "packets", "Most used destination ports"))
-
-    st.caption(
-        "ARP packets have no transport layer, so they appear as 'No transport layer'. "
-        "See **Protocol Analysis** for all three layers."
-    )
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PROTOCOL ANALYSIS
-# ═══════════════════════════════════════════════════════════════════════════════
-elif page == "Protocol Analysis":
-    st.header("Protocol Analysis — Types of Network Traffic")
-    st.markdown(
-        "Every packet travels through several **protocol layers** at once — like envelopes inside envelopes. "
-        "The **network layer** routes it, the **transport layer** delivers it, and the "
-        "**application layer** defines what the data means.\n\n"
-        "> Each section below is a separate view of the **same packets**. "
-        "Do not add the numbers together."
-    )
-
-    layers = A.layer_tables(df)
-    layer_descriptions = {
-        "Network layer": (
-            "The network layer handles addressing and routing between devices. "
-            "IPv4 and IPv6 are the two standards in common use today."
-        ),
-        "Transport layer": (
-            "The transport layer controls how data is delivered. "
-            "**TCP** guarantees order and delivery. **UDP** is faster but does not guarantee delivery. "
-            "**ICMP** carries diagnostic messages (like ping)."
-        ),
-        "Application layer": (
-            "The application layer identifies what the payload is used for — "
-            "web browsing (HTTP/TLS), name resolution (DNS), time sync (NTP), etc."
-        ),
-    }
-
-    for name, t in layers.items():
-        st.subheader(name)
-        st.caption(layer_descriptions[name])
-        col_chart, col_table = st.columns([1, 1])
-        with col_chart:
-            _chart(charts.protocol_donut(t, name))
-        with col_table:
-            t_display = t.copy()
-            t_display["What it does"] = t_display["protocol"].map(A.PROTOCOL_EXPLANATIONS).fillna("—")
-            st.dataframe(
-                t_display.rename(columns={"protocol": "Protocol", "packets": "Packets", "percent": "%"}),
-                hide_index=True, width='stretch',
+    with st.container(border=True):
+        st.markdown("**Likely Your Device**")
+        if capture_hosts:
+            for host in capture_hosts:
+                st.code(host, language=None)
+            st.caption(
+                "This is an estimate. The address appears in at least 90% of all packets, "
+                "which usually means it is the computer that recorded the capture. "
+                "An IP address does not identify a person."
             )
-        st.write("")
+        else:
+            st.caption("No single address appears in at least 90% of the packets, "
+                       "so NetScope cannot estimate which device recorded this capture.")
 
-    with st.expander("📋 Compare with Wireshark display filters (advanced)"):
-        st.caption(
-            "These counts mirror what you would see typing each filter into Wireshark's display filter bar. "
-            "Counts of 0 mean that protocol was not found in this capture."
-        )
+    cols = st.columns(4)
+    metric_card(cols[0], "Number of Packets", f"{ov['packets']:,}",
+                "How many packets (small chunks of data) are in the capture file.")
+    metric_card(cols[1], "Amount of Data", A.format_bytes(ov["bytes"]),
+                "Combined size of all captured packets.")
+    metric_card(cols[2], "Capture Duration", f"{ov['duration']:.1f} seconds",
+                "Time from the first packet to the last packet.")
+    metric_card(cols[3], "Different IP Addresses", f"{ov['unique_ips']:,}",
+                "How many different IP addresses sent or received packets.")
+
+    st.subheader("Network Activity Over Time")
+    st.caption("How busy the network was during the capture. Spikes are bursts of activity.")
+    what = st.radio("Show", ["packets", "bytes"], horizontal=True, key="activity_what",
+                    format_func=lambda x: "Number of packets" if x == "packets" else "Amount of data")
+    table, width = A.traffic_over_time(df)
+    show_chart(charts.time_series(table, what, width))
+
+    left, right = st.columns(2)
+    with left:
+        st.subheader("Types of Traffic")
+        st.caption("How the packets were delivered. Each packet is counted once.")
+        show_chart(charts.protocol_donut(friendly_table(A.layer_tables(df)["Transport layer"]),
+                                         "Share of packets"))
+    with right:
+        st.subheader("Key Observations")
+        st.caption("Written automatically from this capture.")
+        for sentence in A.narrative(df, dns, ov)[1:6]:
+            st.markdown(f"- {sentence}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TYPES OF TRAFFIC
+# ═══════════════════════════════════════════════════════════════════════════════
+elif page == "Types of Traffic":
+    page_header("Types of Traffic",
+                "Every packet can be described in three ways at once, like envelopes inside envelopes.",
+                "Protocol Analysis")
+    st.info("Each tab is a different view of the **same packets**, so do not add the tabs together. "
+            "The percentages inside one tab add up to 100%.")
+
+    layers = A.layer_tables(df)
+    descriptions = {
+        "Network layer": "How packets are addressed and sent between devices (IPv4, IPv6, ARP).",
+        "Transport layer": "How data is delivered: reliably (TCP), quickly (UDP) or as connectivity messages (ICMP).",
+        "Application layer": "What the data is used for, such as website lookups or encrypted web pages.",
+    }
+    tab_names = {"Network layer": "Network", "Transport layer": "Transport",
+                 "Application layer": "Application"}
+    tabs = st.tabs(list(tab_names.values()))
+    for tab, layer in zip(tabs, tab_names):
+        with tab:
+            st.caption(descriptions[layer])
+            t = layers[layer]
+            col_chart, col_table = st.columns(2)
+            with col_chart:
+                show_chart(charts.protocol_donut(friendly_table(t), layer))
+            with col_table:
+                nice = pd.DataFrame({
+                    "Type of traffic": t["protocol"].map(A.friendly_name),
+                    "Protocol": t["protocol"],
+                    "Packets": t["packets"],
+                    "%": t["percent"],
+                    "What it does": t["protocol"].map(A.protocol_description),
+                })
+                st.dataframe(nice, hide_index=True, width="stretch")
+
+    with st.expander("Compare with Wireshark display filters (for students)"):
+        st.caption("These counts match what you would see by typing each filter into Wireshark. "
+                   "A count of 0 means the protocol was not found in this capture.")
         wf = pd.DataFrame([
-            ("tcp",                      int((df["transport"] == "TCP").sum())),
-            ("udp",                      int((df["transport"] == "UDP").sum())),
-            ("dns  (port 53 only)",      int((df["app"] == "DNS").sum())),
-            ("icmp  (ICMPv4 only)",      int((df["transport"] == "ICMP").sum())),
-            ("arp",                      int((df["network"] == "ARP").sum())),
-            ("icmpv6",                   int((df["transport"] == "ICMPv6").sum())),
+            ("tcp", int((df["transport"] == "TCP").sum())),
+            ("udp", int((df["transport"] == "UDP").sum())),
+            ("dns  (port 53 only)", int((df["app"] == "DNS").sum())),
+            ("icmp  (ICMPv4 only)", int((df["transport"] == "ICMP").sum())),
+            ("arp", int((df["network"] == "ARP").sum())),
+            ("icmpv6", int((df["transport"] == "ICMPv6").sum())),
             ("tls (by TLS record header)", int((df["app"] == "TLS").sum())),
-            ("http",                     int((df["app"] == "HTTP").sum())),
+            ("http", int((df["app"] == "HTTP").sum())),
         ], columns=["Wireshark filter", "NetScope count"])
-        st.dataframe(wf, hide_index=True, width='stretch')
-        st.caption(
-            "mDNS and LLMNR are counted separately from `dns`. "
-            "TLS, HTTP and QUIC are identified from packet bytes/ports and are heuristics."
-        )
+        st.dataframe(wf, hide_index=True, width="stretch")
+        st.caption("TLS, HTTP and QUIC are recognised from packet bytes and port numbers, "
+                   "so they are good estimates, not certainties.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TRAFFIC ANALYSIS
+# DEVICES & ACTIVITY
 # ═══════════════════════════════════════════════════════════════════════════════
-elif page == "Traffic Analysis":
-    st.header("Traffic Analysis — Who Sent and Received the Most Data?")
-    st.markdown(
-        "This page shows the busiest IP addresses (senders and receivers), "
-        "their conversations, how traffic changed over time, and which services were most active."
-    )
+elif page == "Devices & Activity":
+    page_header("Devices & Activity",
+                "Which IP addresses were busiest and which services they used. "
+                "Activity over time is on the Overview page.",
+                "Traffic Analysis")
 
-    # Top senders / receivers
-    st.subheader("Who sent and received the most packets?")
-    st.caption(
-        "These are the IP addresses that appeared most often as the sender or receiver. "
-        "Your own device usually appears at the top. ★ marks the likely capture device."
-    )
+    st.subheader("Busiest IP Addresses")
+    st.caption("Counted by number of packets. Your own device usually appears near the top.")
     a, b = st.columns(2)
     with a:
-        st.caption("**Top Sender IP Addresses**")
-        _chart(charts.bar_h(A.top_talkers(df, "src"), "src", "packets", "Top senders (packets)"))
+        show_chart(charts.bar_h(A.top_talkers(df, "src"), "src", "packets", "Top Sender IP Addresses"))
     with b:
-        st.caption("**Top Receiver IP Addresses**")
-        _chart(charts.bar_h(A.top_talkers(df, "dst"), "dst", "packets",
-                            "Top receivers (packets)", charts.SERIES[1]))
+        show_chart(charts.bar_h(A.top_talkers(df, "dst"), "dst", "packets",
+                                "Top Receiver IP Addresses", charts.SERIES[1]))
 
-    # Conversations
-    st.subheader("Most Active Device Pairs")
-    st.caption(
-        "A conversation is a pair of IP addresses that exchanged packets. "
-        "Traffic in both directions is combined into one row."
-    )
-    conv_df = A.conversations(df).head(15)
-    conv_display = conv_df.rename(columns={"a": "Sender / Receiver A", "b": "Sender / Receiver B"}).copy()
-    conv_display["Sender / Receiver A"] = conv_display["Sender / Receiver A"].apply(
-        lambda ip: f"★ {ip} (your device)" if ip in capture_hosts else ip
-    )
-    conv_display["Sender / Receiver B"] = conv_display["Sender / Receiver B"].apply(
-        lambda ip: f"★ {ip} (your device)" if ip in capture_hosts else ip
-    )
-    conv_display["bytes"] = conv_display["bytes"].apply(A.format_bytes)
-    st.dataframe(
-        conv_display.rename(columns={"packets": "Packets", "bytes": "Data Transferred"}),
-        hide_index=True, width='stretch',
-    )
+    st.subheader("Most Active Pairs of Devices")
+    st.caption("Each row is two IP addresses that exchanged packets. "
+               "Traffic in both directions is added together. "
+               "See Who Talks to Whom for the direction.")
+    pairs = A.conversations(df).head(15)
+    pairs_table = pd.DataFrame({
+        "IP Address A": pairs["a"],
+        "IP Address B": pairs["b"],
+        "Packets": pairs["packets"],
+        "Data": pairs["bytes"].apply(A.format_bytes),
+    })
+    st.dataframe(pairs_table, hide_index=True, width="stretch")
 
-    # Traffic over time
-    st.subheader("Network Activity Over Time")
-    st.caption(
-        "This chart shows how busy the network was at each moment during the capture. "
-        "Spikes may indicate bursts of activity such as file downloads or web page loads."
-    )
-    metric = st.radio("Show", ["packets", "bytes"], horizontal=True,
-                      format_func=lambda x: "Packet count" if x == "packets" else "Bytes transferred")
-    tbl, width = A.traffic_over_time(df)
-    _chart(charts.time_series(tbl, metric, width))
+    st.subheader("Services Being Used")
+    st.caption("A port number tells a device which program should receive the data. "
+               "443 = secure web (HTTPS), 53 = website lookups (DNS), 80 = plain web (HTTP).")
+    ports = A.top_ports(df, "dport", 10).copy()
+    ports["port"] = ports["port"].apply(A.label_port)
+    show_chart(charts.bar_h(ports, "port", "packets", "Most used receiver ports", charts.SERIES[3]))
 
-    # Ports
-    st.subheader("Services Being Used (Ports)")
-    st.caption(
-        "Ports identify which service on a device is communicating. "
-        "Port 443 = HTTPS (secure web), 53 = DNS (name lookup), 80 = HTTP (plain web)."
-    )
-    p1, p2 = st.columns(2)
-    with p1:
-        st.caption("**Source ports** — where connections came from")
-        src_ports = A.top_ports(df, "sport", 10).copy()
-        src_ports["port"] = src_ports["port"].apply(A.label_port)
-        _chart(charts.bar_h(src_ports, "port", "packets", "Common source ports", charts.SERIES[2]))
-    with p2:
-        st.caption("**Destination ports** — which services were contacted")
-        dst_ports = A.top_ports(df, "dport", 10).copy()
-        dst_ports["port"] = dst_ports["port"].apply(A.label_port)
-        _chart(charts.bar_h(dst_ports, "port", "packets", "Common destination ports", charts.SERIES[3]))
-
-    # Packet size distribution
-    st.subheader("Packet Size Distribution")
-    st.caption(
-        "Small packets (under 100 bytes) are often control messages. "
-        "Large packets near 1500 bytes are typically data transfers — this is the typical "
-        "maximum size for Ethernet frames (called the MTU)."
-    )
-    _chart(charts.histogram(A.length_histogram(df)))
+    st.subheader("Packet Sizes")
+    st.caption("Small packets (under 100 bytes) are usually control messages. "
+               "Packets near 1,500 bytes are usually real data, because that is the normal "
+               "maximum size on Ethernet.")
+    show_chart(charts.histogram(A.length_histogram(df)))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# DNS ANALYSIS
+# WEBSITE LOOKUPS
 # ═══════════════════════════════════════════════════════════════════════════════
-elif page == "DNS Analysis":
-    st.header("DNS Analysis — Website Address Lookups")
-    st.markdown(
-        "**DNS (Domain Name System)** is like a phone book for the internet. "
-        "When your computer visits `google.com`, it first asks a DNS server: "
-        "_\"What is the IP address for google.com?\"_ — that is a DNS query. "
-        "This page shows all such lookups found in your capture."
-    )
+elif page == "Website Lookups":
+    page_header("Website Lookups",
+                "Before a device connects to a name like google.com, it asks a DNS server "
+                "\"what is the IP address for this name?\". Those questions and answers are shown here.",
+                "DNS Analysis")
+    st.caption("A lookup only shows that a device asked about a name. "
+               "It does not prove that a website was opened or viewed.")
 
     ds = A.dns_summary(dns)
     if not ds["available"]:
-        st.info(
-            "No standard DNS (port 53) packets were found in this capture.\n\n"
-            "This can happen if DNS traffic was filtered out before saving, "
-            "or if the capture was very short. mDNS (multicast DNS) traffic uses "
-            "port 5353 and would appear in Protocol Analysis as 'mDNS'."
-        )
+        st.info("No standard DNS lookups (port 53) were found in this capture. "
+                "The lookups may have been filtered out before saving, or the capture was very short. "
+                "Local lookups (mDNS) appear on the Types of Traffic page.")
     else:
-        c = st.columns(5)
-        c[0].metric("🔍 DNS Queries Sent", ds["queries"],
-                    help="DNS lookup requests sent by this device.")
-        c[1].metric("✅ Responses Received", ds["responses"],
-                    help="Answers received from DNS servers.")
-        c[2].metric("❌ Failed Responses", ds["failed"],
-                    help="Responses with an error code (e.g. NXDOMAIN = name not found).")
-        c[3].metric("❓ Unanswered Queries", ds["unanswered"],
-                    help="Queries for which no response was seen in this capture window.")
-        c[4].metric("⏱ Median Reply Time",
-                    f"{ds['rtt_median_ms']:.1f} ms" if ds["rtt_median_ms"] is not None else "—",
-                    help="Median time between a DNS query and its matching response.")
+        cols = st.columns(3)
+        metric_card(cols[0], "Lookups Sent", f"{ds['queries']:,}", "Questions sent to a DNS server.")
+        metric_card(cols[1], "Answers Received", f"{ds['responses']:,}", "Replies received from DNS servers.")
+        metric_card(cols[2], "Failed Lookups", f"{ds['failed']:,}",
+                    "Replies that reported an error, for example 'name does not exist'.")
+        metric_card(cols[0], "Unanswered Lookups", f"{ds['unanswered']:,}",
+                    "Questions with no matching answer inside this capture.")
+        rtt = ds["rtt_median_ms"]
+        metric_card(cols[1], "Typical Reply Time", f"{rtt:.1f} ms" if rtt is not None else "—",
+                    "Median time between a question and its matching answer.")
 
-        st.markdown(f"**DNS servers used:** `{'`, `'.join(ds['servers'])}`")
-        st.caption(
-            "A DNS server is the computer that answers name lookups. "
-            "Common DNS servers: 8.8.8.8 (Google), 1.1.1.1 (Cloudflare), 192.168.x.x (your router)."
-        )
+        st.subheader("DNS Servers Used")
+        st.caption("A DNS server is the computer that answers the lookups.")
+        st.code("\n".join(ds["servers"]), language=None)
 
         a, b = st.columns(2)
         with a:
-            st.subheader("Most Looked-Up Domain Names")
-            st.caption("Names your device asked the DNS server to resolve.")
-            _chart(charts.bar_h(
-                A.dns_domains(dns, 12).assign(
-                    label=lambda d: d["qname"] + " (" + d["qtype"] + ")"
-                ), "label", "queries", "Most queried names"
-            ))
+            st.subheader("Most Looked-Up Names")
+            names = A.dns_domains(dns, 12).assign(label=lambda d: d["qname"] + " (" + d["qtype"] + ")")
+            show_chart(charts.bar_h(names, "label", "queries", "Names asked about"))
         with b:
-            st.subheader("Query Types")
-            st.caption(
-                "**A** = IPv4 address lookup · "
-                "**AAAA** = IPv6 address lookup · "
-                "**PTR** = reverse lookup (IP → name) · "
-                "**HTTPS** = service info"
-            )
-            _chart(charts.protocol_donut(
+            st.subheader("Kinds of Lookup")
+            st.caption("**A** = IPv4 address · **AAAA** = IPv6 address · "
+                       "**PTR** = find the name for an IP address · **HTTPS** = service details")
+            show_chart(charts.protocol_donut(
                 A.dns_types(dns).rename(columns={"type": "protocol", "queries": "packets"}),
-                "Query types"
-            ))
+                "Lookup types"))
 
-        # Failed DNS responses
         failed = dns[dns["is_response"] & (dns["rcode"] != "NOERROR")]
         if len(failed):
-            st.subheader("Failed DNS Responses")
-            rcodes_seen = failed["rcode"].unique()
-            st.caption(
-                "  |  ".join(
-                    f"**{rc}**: {A.DNS_RCODE_EXPLANATIONS.get(rc, '')}" for rc in rcodes_seen
-                )
-            )
+            st.subheader("Failed Lookups")
+            st.caption("  |  ".join(f"**{rc}**: {A.DNS_RCODE_EXPLANATIONS.get(rc, '')}"
+                                    for rc in failed["rcode"].unique()))
             st.dataframe(
-                failed[["no", "qname", "qtype", "rcode", "src"]].rename(columns={"src": "server"}),
-                hide_index=True, width='stretch',
-            )
-            st.caption(
-                "NXDOMAIN for reverse lookups (PTR queries on local addresses like 192.168.x.x) "
-                "is completely normal — it just means there is no reverse DNS entry set up."
-            )
+                failed[["no", "qname", "qtype", "rcode", "src"]].rename(
+                    columns={"no": "Packet No.", "qname": "Name", "qtype": "Type",
+                             "rcode": "Result", "src": "DNS Server"}),
+                hide_index=True, width="stretch")
+            st.caption("A failed lookup for a local address (like 192.168.x.x) is usually normal: "
+                       "it just means no name was registered for it.")
 
-        st.subheader("DNS Answers Received")
-        st.caption("Each row is a DNS response. The 'answers' column shows what IP address the DNS server returned.")
-        st.dataframe(A.dns_answers(dns, 200), hide_index=True, width='stretch')
+        st.subheader("Answers Received")
+        st.caption("Each row is one answer. The last column shows the IP address the server gave back.")
+        st.dataframe(A.dns_answers(dns, 200), hide_index=True, width="stretch")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PACKET EXPLORER
+# BROWSE PACKETS
 # ═══════════════════════════════════════════════════════════════════════════════
-elif page == "Packet Explorer":
-    st.header("Packet Explorer — Browse Every Packet")
-    st.markdown(
-        "Browse every packet in the capture. Use the filters below to narrow down "
-        "what you see, then download the results as a CSV file."
-    )
+elif page == "Browse Packets":
+    page_header("Browse Packets",
+                "Look at the packets one by one. Filter the list, then click a row to see its details.",
+                "Packet Explorer")
 
-    # Filters
-    f1, f2, f3, f4 = st.columns([2, 2, 1, 2])
-    protos = f1.multiselect(
-        "Protocol",
-        sorted(df["protocol"].unique()),
-        help="Filter to one or more protocols (e.g. TCP, DNS, TLS).",
-    )
-    ipq = f2.text_input(
-        "IP address contains",
-        placeholder="e.g. 192.168.1",
-        help="Matches packets where either the sender OR receiver IP contains this text.",
-    )
-    port = f3.text_input(
-        "Port",
-        placeholder="e.g. 443",
-        help="Filter to packets using this port number (source or destination).",
-    )
-    text = f4.text_input(
-        "Search info",
-        placeholder="e.g. SYN or google.com",
-        help="Search the packet description field (not the encrypted payload).",
-    )
+    f1, f2 = st.columns(2)
+    protos = f1.multiselect("Type of traffic", sorted(df["protocol"].unique()),
+                            format_func=A.protocol_label,
+                            help="Show only these types of traffic.")
+    ipq = f2.text_input("IP address contains", placeholder="e.g. 192.168.1",
+                        help="Matches packets where the sender OR the receiver address contains this text.")
+    f3, f4 = st.columns(2)
+    port = f3.text_input("Port", placeholder="e.g. 443",
+                         help="Show packets that use this port number (sender or receiver).")
+    text = f4.text_input("Search the packet description", placeholder="e.g. SYN or google.com",
+                         help="Searches the description column, not the packet contents.")
 
-    # Apply filters
-    v = df.copy()
+    v = df
     if protos:
         v = v[v["protocol"].isin(protos)]
     if ipq:
@@ -508,186 +401,182 @@ elif page == "Packet Explorer":
         p = int(port)
         v = v[(v["sport"] == p) | (v["dport"] == p)]
     elif port.strip():
-        st.warning("Port must be a whole number (e.g. 443).")
+        st.warning("Port must be a whole number, for example 443.")
     if text:
         v = v[v["info"].str.contains(text, case=False, regex=False)]
 
-    match_msg = f"**{len(v):,}** of {len(df):,} packets match"
+    message = f"**{len(v):,}** of {len(df):,} packets match."
     if len(v) > 5000:
-        match_msg += " (showing first 5,000 — download CSV for all)"
-    st.write(match_msg)
+        message += " Showing the first 5,000. The CSV download has all of them."
+    st.write(message)
 
-    show = v.copy()
-    show["timestamp"] = (
-        pd.to_datetime(show["time"], unit="s", utc=True)
-        .dt.strftime("%H:%M:%S.%f")
-        .str[:-3]
-    )
-    show["src"] = show["src"].apply(lambda ip: f"★ {ip}" if ip in capture_hosts else ip)
-    st.dataframe(
-        show[["no", "timestamp", "src", "dst", "protocol", "sport", "dport", "length", "info"]].head(5000),
-        hide_index=True,
-        width='stretch',
-        height=480,
-        column_config={
-            "no":        st.column_config.NumberColumn("No.", width="small"),
-            "timestamp": st.column_config.TextColumn("Time", width="small"),
-            "src":       st.column_config.TextColumn("Sender IP", width="medium"),
-            "dst":       st.column_config.TextColumn("Receiver IP", width="medium"),
-            "protocol":  st.column_config.TextColumn("Protocol", width="small"),
-            "sport":     st.column_config.NumberColumn("Sender Port", width="small"),
-            "dport":     st.column_config.NumberColumn("Receiver Port", width="small"),
-            "length":    st.column_config.NumberColumn("Bytes", width="small"),
-            "info":      st.column_config.TextColumn("Info", width="large"),
-        },
-    )
+    if len(v) == 0:
+        st.info("No packets match these filters. Try removing one.")
+    else:
+        shown = v.head(5000).reset_index(drop=True)
+        table = pd.DataFrame({
+            "No.": shown["no"],
+            "Time": pd.to_datetime(shown["time"], unit="s", utc=True).dt.strftime("%H:%M:%S.%f").str[:-3],
+            "Sender IP": shown["src"],
+            "Receiver IP": shown["dst"],
+            "Protocol": shown["protocol"],
+            "Size (bytes)": shown["length"],
+            "Sender Port": shown["sport"],
+            "Receiver Port": shown["dport"],
+            "TCP Flags": shown["tcp_flags"],
+            "Description": shown["info"],
+        })
+        # The key changes when the filters or the capture change, so an old row selection is dropped.
+        filter_text = repr((protos, ipq, port, text))
+        table_key = "packets_" + hashlib.md5((cap.fingerprint + filter_text).encode()).hexdigest()[:10]
+        event = st.dataframe(table, hide_index=True, width="stretch", height=420,
+                             on_select="rerun", selection_mode="single-row", key=table_key)
 
-    # Export
-    export_cols = ["no", "src", "dst", "network", "transport", "app",
-                   "protocol", "sport", "dport", "length", "tcp_flags", "info"]
-    export = v[export_cols].copy()
+        picked = event.selection.rows
+        if picked and picked[0] < len(shown):
+            packet = shown.iloc[picked[0]]
+            details = A.packet_detail(packet)
+            with st.container(border=True):
+                st.subheader(f"Packet number {int(packet['no'])}")
+                left, right = st.columns(2)
+                with left:
+                    show_ip("Sender IP Address", details["Sender IP Address"])
+                with right:
+                    show_ip("Receiver IP Address", details["Receiver IP Address"])
+                for label, value in details.items():
+                    if label not in ("Sender IP Address", "Receiver IP Address"):
+                        st.markdown(f"**{label}:** {value}")
+                st.markdown(f"**Description:** {packet['info']}")
+                with st.expander("More technical details"):
+                    st.markdown(
+                        f"- **Network layer:** {packet['network']} — {A.protocol_description(packet['network'])}\n"
+                        f"- **Transport layer:** {packet['transport'] or 'none'} — "
+                        f"{A.protocol_description(packet['transport']) or 'not used by this packet'}\n"
+                        f"- **Application layer:** {packet['app'] or 'none identified'}\n"
+                        f"- **Seconds since capture started:** {packet['rel_time']:.6f}"
+                    )
+        else:
+            st.info("Click a row in the table to see the details of that packet.")
+
+    export_columns = ["no", "src", "dst", "network", "transport", "app",
+                      "protocol", "sport", "dport", "length", "tcp_flags", "info"]
+    export = v[export_columns].copy()
     export.insert(1, "timestamp_utc", pd.to_datetime(v["time"], unit="s", utc=True).astype(str))
-    st.download_button(
-        "⬇ Download filtered packets as CSV",
-        export.to_csv(index=False).encode("utf-8"),
-        "netscope_packets.csv",
-        "text/csv",
-        help="Downloads all matching packets (not just the first 5,000 shown above).",
-    )
-    st.caption("★ marks the IP address identified as your device (estimate).")
+    st.download_button("Download these packets as CSV", export.to_csv(index=False).encode("utf-8"),
+                       "netscope_packets.csv", "text/csv",
+                       help="Downloads every packet that matches the filters, not just the 5,000 shown.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECURITY INSIGHTS
+# UNUSUAL ACTIVITY
 # ═══════════════════════════════════════════════════════════════════════════════
-elif page == "Security Insights":
-    st.header("Security Insights — Unusual Network Activity")
-    st.markdown(
-        "NetScope checks your capture against **five simple rules** that look for patterns "
-        "associated with unusual network behaviour. These are **not confirmations of attacks** — "
-        "they are observations worth investigating further.\n\n"
-        "Think of them like a checklist a networking teacher might go through when reviewing a capture."
-    )
+elif page == "Unusual Activity":
+    page_header("Unusual Activity",
+                "NetScope checks the capture against five simple rules. A match is something "
+                "worth a second look, not proof of an attack.",
+                "Security Insights")
 
-    with st.expander("ℹ What do these findings mean?"):
-        st.markdown("""
-**Medium** 🟠 — Pattern is unusual and worth investigating, but has innocent explanations.  
-**Low** 🟡 — Mildly unusual; often caused by normal retries or caching.  
-**Info** 🔵 — Informational observation; very likely normal behaviour.
-
-Remember: NetScope only sees what was captured. A missing response might simply be outside the capture window.
-""")
-
+    colours = {"Medium": "orange", "Low": "yellow", "Info": "blue"}
     if not alerts:
-        st.success(
-            "✅ No indicators were triggered for this capture. "
-            "All five rules checked out clean based on the patterns in this file."
-        )
+        st.success("None of the five checks found anything unusual in this capture.")
+    else:
+        st.write(f"**{len(alerts)}** observation(s). Click one to see the details.")
     for a in alerts:
-        icon = {"Medium": "🟠", "Low": "🟡", "Info": "🔵"}[a.severity]
-        with st.expander(f"{icon} [{a.severity}] {a.title}", expanded=True):
+        with st.expander(f":{colours[a.severity]}[**{a.severity}**] {a.title}", expanded=False):
+            st.markdown("**What was observed**")
             st.write(a.explanation)
-            st.caption("Evidence from the capture:")
+            st.markdown("**Evidence from the capture**")
+            st.dataframe(pd.DataFrame(list(a.evidence.items()), columns=["Detail", "Value"]),
+                         hide_index=True, width="stretch")
+            st.markdown("**Why this is not proof of an attack**")
+            st.write(a.caveat)
+
+    st.caption("**Medium**: unusual, with possible innocent explanations · "
+               "**Low**: mildly unusual, often normal retries · "
+               "**Info**: probably normal behaviour. "
+               "NetScope only sees what was captured, so a missing reply may simply be outside the capture.")
+
+    with st.expander("How each check works"):
+        st.caption("These are the exact conditions. The limits can be changed in `rules.py`.")
+        st.dataframe(rules.rules_table().rename(columns={"Rule": "Check", "Fires when": "Flagged when"}),
+                     hide_index=True, width="stretch")
+        if capture_hosts:
+            st.caption(f"The likely capture device ({', '.join(capture_hosts)}) is left out of the "
+                       "'busy sender' check, because the recording computer is in nearly every packet.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# WHO TALKS TO WHOM
+# ═══════════════════════════════════════════════════════════════════════════════
+elif page == "Who Talks to Whom":
+    page_header("Who Talks to Whom",
+                "Each dot is an IP address. Each arrow points from the sender to the receiver.",
+                "Communication Map")
+
+    flows = A.directed_flows(df)
+    if flows.empty:
+        st.info("No IP conversations to draw. The capture may contain only ARP or other non-IP packets.")
+    else:
+        max_n = min(30, len(flows))
+        if max_n > 3:
+            top_n = st.slider("Number of busiest connections to show", 3, max_n, min(12, max_n),
+                              help="Each connection is one sender → one receiver. "
+                                   "Fewer connections make the map easier to read.")
+        else:
+            top_n = max_n
+        show_chart(charts.comm_map(flows, top_n, highlight_nodes=set(capture_hosts)))
+
+        st.markdown(
+            "**How to read this map**\n\n"
+            "- **Dot** = one IP address. A bigger dot sent and received more data.\n"
+            "- **Arrow** = packets sent from one IP address to another. The arrow points at the receiver.\n"
+            "- **Thicker arrow** = more data in that direction.\n"
+            "- **Green dot** = the likely capture device (an estimate). **Blue dot** = any other address.\n"
+            "- **Hover** over a dot or the middle of an arrow for exact numbers and the protocols seen."
+        )
+        st.caption(f"Showing the {top_n} busiest of {len(flows):,} sender → receiver connections, ranked by data. "
+                   "Only IP packets are drawn. The map does not show locations or device names.")
+
+        with st.expander("Connections shown (copyable table)"):
             st.dataframe(
-                pd.DataFrame(list(a.evidence.items()), columns=["Field", "Value"]),
-                hide_index=True, width='stretch',
-            )
-            st.caption(f"⚠ {a.caveat}")
-
-    st.divider()
-    st.subheader("Rules Checked")
-    st.caption("These are the exact conditions that trigger each finding. All thresholds are configurable in `rules.py`.")
-    st.dataframe(
-        rules.rules_table().rename(columns={"Rule": "Rule name", "Fires when": "Triggered when"}),
-        hide_index=True, width='stretch',
-    )
-
-    if capture_hosts:
-        st.caption(
-            f"**Likely capture device(s):** {', '.join(capture_hosts)} — "
-            "excluded from the 'high traffic from one source' rule, since the recording "
-            "device naturally appears in every packet."
-        )
-    else:
-        st.caption("No single device was identified as the likely capture host (no IP appears in ≥90% of packets).")
+                pd.DataFrame({
+                    "Sender IP": flows["src"].head(top_n),
+                    "Receiver IP": flows["dst"].head(top_n),
+                    "Packets": flows["packets"].head(top_n),
+                    "Data": flows["bytes"].head(top_n).apply(A.format_bytes),
+                    "Protocols seen": flows["protocols"].head(top_n),
+                }),
+                hide_index=True, width="stretch")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# COMMUNICATION MAP
+# DOWNLOAD REPORTS
 # ═══════════════════════════════════════════════════════════════════════════════
-elif page == "Communication Map":
-    st.header("Communication Map — Who Is Communicating With Whom?")
-    st.markdown(
-        "Each **dot** represents an IP address. Each **line** is a conversation — "
-        "packets exchanged between two addresses. Thicker lines carried more data.\n\n"
-        "🌟 **Green star** = likely your device (the one that recorded the capture)."
-    )
+elif page == "Download Reports":
+    page_header("Download Reports",
+                "Save the results of this capture to use in a spreadsheet or a project report.")
 
-    n = st.slider(
-        "Number of devices to show",
-        5, 40, 20,
-        help="Shows only the busiest endpoints to keep the map readable. Increase to see more.",
-    )
-    fig = charts.comm_map(A.conversations(df), n, highlight_nodes=set(capture_hosts))
-    if fig is None:
-        st.info("No IP conversations to draw — the capture may contain only ARP or non-IP packets.")
-    else:
-        _chart(fig)
-        st.caption(
-            "Only the busiest endpoints are shown. Hover over any dot or line for details. "
-            "Isolated dots that share no edge had conversations only with endpoints not in the top list."
-        )
+    with st.container(border=True):
+        st.subheader("CSV spreadsheet")
+        st.caption(f"Every packet in the capture ({len(df):,} rows, {len(df.columns)} columns): time, "
+                   "sender and receiver IP, protocol, ports and size. Opens in Excel or Google Sheets.")
+        st.download_button("Download CSV", df.to_csv(index=False).encode("utf-8"),
+                           "netscope_all_packets.csv", "text/csv")
 
-    with st.expander("📖 How to read this map"):
-        st.markdown("""
-- **Node size** = total bytes sent and received by that IP address
-- **Line thickness** = bytes in that specific conversation
-- **Green star** = your device (most likely the computer running Wireshark)
-- **Blue dots** = other devices (could be local or on the internet)
-- **Hover** over any node or line to see exact numbers
-""")
+    with st.container(border=True):
+        st.subheader("PDF report")
+        st.caption("A short written report: summary table, types of traffic, busiest IP addresses, "
+                   "website lookups, a traffic chart and the unusual-activity findings.")
+        if st.button("Create PDF report", type="primary"):
+            with st.spinner("Building the PDF… this takes a few seconds."):
+                # The PDF is stored together with the fingerprint of the capture it was made from.
+                st.session_state["pdf_report"] = {"capture": cap.fingerprint,
+                                                  "bytes": build_pdf(cap, alerts)}
+        report = st.session_state.get("pdf_report")
+        if report and report["capture"] == cap.fingerprint:
+            st.success("The PDF is ready.")
+            st.download_button("Download PDF", report["bytes"], "netscope_report.pdf", "application/pdf")
+        elif report:
+            st.info("The PDF you made earlier belongs to a different capture. Create a new one for this file.")
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# REPORTS
-# ═══════════════════════════════════════════════════════════════════════════════
-elif page == "Reports":
-    st.header("Export & Reports")
-    st.markdown(
-        "Download the data for use in your project report, spreadsheets, or further analysis."
-    )
-
-    st.subheader("📄 CSV Export")
-    st.caption("A CSV file can be opened in Excel, Google Sheets, or any spreadsheet tool.")
-    st.download_button(
-        "⬇ Download all packets as CSV",
-        df.to_csv(index=False).encode("utf-8"),
-        "netscope_all_packets.csv",
-        "text/csv",
-        help=f"All {len(df):,} packets with 14 columns including timestamps, IPs, protocols, ports and lengths.",
-    )
-
-    st.divider()
-    st.subheader("📋 PDF Report")
-    st.caption(
-        "The PDF includes a summary table, protocol statistics, top talkers, DNS observations, "
-        "traffic chart, and security findings — suitable for a project submission."
-    )
-    if st.button("Generate PDF report", type="primary"):
-        with st.spinner("Building PDF… this takes a few seconds."):
-            st.session_state["pdf"] = build_pdf(cap, alerts)
-        st.success("PDF ready — click the download button below.")
-
-    if "pdf" in st.session_state:
-        st.download_button(
-            "⬇ Download PDF report",
-            st.session_state["pdf"],
-            "netscope_report.pdf",
-            "application/pdf",
-        )
-
-    st.divider()
-    st.caption(
-        "All exported data describes only the capture currently loaded. "
-        "Nothing is saved on the server."
-    )
+    st.caption("Everything exported comes from the capture that is loaded now. Nothing is stored on the server.")

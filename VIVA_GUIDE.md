@@ -12,10 +12,10 @@ NetScope is divided into 6 modular Python files in a single flat folder. Each fi
 
 | File | Lines | Role | Primary Responsibility |
 |---|---|---|---|
-| `app.py` | 693 | Presentation & Controller | Builds the Streamlit web interface, manages sidebar navigation (8 pages), handles file upload caching, and displays charts/tables. |
+| `app.py` | 582 | Presentation & Controller | Builds the Streamlit web interface, manages sidebar navigation (8 pages), handles file upload caching, and displays charts/tables. |
 | `parser.py` | 296 | Packet Decoding Engine | Uses Scapy (`PcapReader`) to decode binary `.pcap`/`.pcapng` packets into Pandas DataFrames. Only file that touches raw packets. |
 | `analysis.py` | 317 | Statistics & Aggregation | Computes metrics (totals, protocol shares, top talkers, time buckets, DNS latency) and generates the plain-English narrative. Zero UI code. |
-| `charts.py` | 217 | Plotly Visualization | Converts computed tables into Plotly figures with a clean dark theme. Uses NetworkX to compute coordinates for the communication map. |
+| `charts.py` | 204 | Plotly Visualization | Converts computed tables into Plotly figures that works on light and dark themes. Uses NetworkX to compute coordinates for the communication map. |
 | `rules.py` | 250 | Heuristic Security Checks | Checks packet tables against 5 fixed threshold rules (SYN flood, port scan, etc.). Generates `Alert` objects with evidence. |
 | `pdf_report.py` | 239 | PDF Report Generator | Uses ReportLab to generate a formal 6-section printable PDF report directly from in-memory metrics. |
 
@@ -117,13 +117,13 @@ TCP flags are 1-bit control signals inside the TCP header:
 **Answer:**  
 In `parser.py`, `_is_tls()` inspects the first 5 bytes of the TCP payload using a heuristic: the first byte must be a TLS content type (20–23) and the second byte must be version 3 (`\x03\x01` to `\x03\x04`). This identifies that a TLS session is taking place without decrypting or reading the private user payload.
 
-#### Q9: Why do protocol percentages in Protocol Analysis not add up to 100% across all sections?
+#### Q9: Why do protocol percentages in Types of Traffic not add up to 100% across all tabs?
 **Answer:**  
 Because network protocols are layered inside one another. A single web request packet is simultaneously an IPv4 packet (Network layer), a TCP packet (Transport layer), and a TLS packet (Application layer). Adding them together would count the same packet three times. NetScope separates them into 3 distinct tables, and each layer sums to 100% independently.
 
 #### Q10: What is the difference between TCP and UDP in this capture?
 **Answer:**  
-TCP is connection-oriented and reliable — it ensures packets arrive in order and retransmits lost packets (used for web browsing, email, file transfers). UDP is connectionless and faster — it sends packets without handshakes or delivery guarantees (used for DNS lookups, video streaming, and online gaming). NetScope shows this distribution on the Overview and Protocol Analysis pages.
+TCP is connection-oriented and reliable — it ensures packets arrive in order and retransmits lost packets (used for web browsing, email, file transfers). UDP is connectionless and faster — it sends packets without handshakes or delivery guarantees (used for DNS lookups, video streaming, and online gaming). NetScope shows this distribution on the Overview and Types of Traffic pages.
 
 ---
 
@@ -143,7 +143,7 @@ In `rules.py`, `likely_capture_hosts()` checks the frequency of every IP address
 
 #### Q14: How does the Communication Map work?
 **Answer:**  
-In `charts.py`, `comm_map()` uses the `networkx` library to build a mathematical graph where nodes are IP addresses and edges are active conversations. It uses the `spring_layout` algorithm (a force-directed physics model where connected nodes attract and all nodes repel) to position nodes in 2D space. Plotly then renders the lines (thickness = bytes) and nodes (local device = green star, remote devices = blue circles).
+First `directed_flows()` in `analysis.py` groups the IP packets by (sender IP, receiver IP) and counts packets and bytes. A→B and B→A are separate rows, so direction is real data from the packets. `comm_map()` in `charts.py` takes the busiest N rows, uses the `networkx` `spring_layout` to place the IP addresses, and draws one arrow per row with Plotly (arrow thickness = bytes). Dot size = bytes sent and received. The green dot is the likely capture device, which is only an estimate.
 
 ---
 

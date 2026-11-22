@@ -14,7 +14,7 @@ The project uses a flat, minimal Python architecture:
 
 ```
 netscope/
-├── app.py             # Streamlit web app (8 pages, UI layout & filters)
+├── app.py             # Streamlit web app (8 pages, layout & filters)
 ├── parser.py          # Scapy packet reader -> Pandas DataFrame
 ├── analysis.py        # Statistical calculations & plain-English narrative
 ├── charts.py          # Plotly visualization builders & NetworkX graph
@@ -23,10 +23,11 @@ netscope/
 ├── requirements.txt   # Python dependencies
 ├── README.md          # Project documentation
 ├── VIVA_GUIDE.md      # Architecture breakdown & 20 viva Q&As
-├── captures/          # Sample capture files for lab testing
 └── tests/
-    ├── test_core.py       # 20 unit tests (metrics, parser, rules, PDF)
-    └── test_e2e_pages.py  # 2 end-to-end Streamlit page tests
+    ├── conftest.py            # builds a small synthetic capture with Scapy
+    ├── test_core.py           # parser, statistics, rules, CSV/PDF export
+    ├── test_new_features.py   # plain-English names, directed flows, map, packet details
+    └── test_e2e_pages.py      # Streamlit page tests (AppTest)
 ```
 
 ---
@@ -62,7 +63,7 @@ The application will open in your browser at `http://localhost:8501`.
 python -m pytest -v
 ```
 
-All 22 tests verify packet parsing accuracy, Wireshark filter parity, security indicator rules, CSV/PDF export, and all 8 dashboard pages.
+The tests build their own small capture, so they pass after a fresh clone and need no private file. One extra test compares NetScope with Wireshark on the real lab capture; it runs only if `captures/netscope_first_capture.pcapng` exists on your computer, and is skipped otherwise.
 
 ---
 
@@ -88,14 +89,14 @@ All 22 tests verify packet parsing accuracy, Wireshark filter parity, security i
 
 | Page | What it Shows |
 |---|---|
-| **Overview** | Headline metrics (packets, bytes, duration, unique IPs), Likely Your Device card, auto-generated factual narrative, transport share donut, and top destination services. |
-| **Protocol Analysis** | Independent breakdowns for Network (IPv4/IPv6/ARP), Transport (TCP/UDP/ICMP), and Application (TLS/DNS/HTTP) layers, plus Wireshark display filter comparison. |
-| **Traffic Analysis** | Top sender and receiver IP addresses, most active device pairs (conversations), network activity over time, source/destination ports, and packet size distribution. |
-| **DNS Analysis** | Lookup volume, success vs. failed responses (NXDOMAIN, SERVFAIL), query types (A, AAAA, PTR), DNS servers used, response latency (RTT), and answered domain records. |
-| **Packet Explorer** | Searchable and filterable packet table (by protocol, IP, port, or info text). Supports live searching and partial filtering. |
-| **Security Insights** | 5 rule-based heuristic checks (SYN flood, port scan, connection attempts, dominant source, repeated DNS) with full packet evidence. |
-| **Communication Map** | Interactive network topology graph (NetworkX + Plotly). Nodes = IP addresses; line thickness = bytes transferred; green star = likely your device. |
-| **Reports** | Full packet table export as CSV and formal 6-section printable PDF report built with ReportLab. |
+| **Overview** | Likely Your Device card (an estimate), four headline numbers, network activity over time, types of traffic donut, and key observations written from the capture. |
+| **Types of Traffic** *(Protocol Analysis)* | Three tabs: Network (IPv4/IPv6/ARP), Transport (TCP/UDP/ICMP) and Application (TLS/DNS/HTTP). Each shows a chart and a table with plain-English names. Also a Wireshark display filter comparison. |
+| **Devices & Activity** *(Traffic Analysis)* | Top sender and receiver IP addresses, most active pairs of devices, services used (receiver ports) and packet sizes. |
+| **Website Lookups** *(DNS Analysis)* | Lookups sent and answered, failed lookups, DNS servers, most looked-up names, lookup types and the answers received. |
+| **Browse Packets** *(Packet Explorer)* | Filter by traffic type, IP address, port or description. Click a row to open a detail panel with sender, receiver, protocol, size, time, ports and TCP flags. |
+| **Unusual Activity** *(Security Insights)* | 5 rule-based checks. Each finding is collapsed by default and explains what was seen, the evidence, and why it is not proof of an attack. |
+| **Who Talks to Whom** *(Communication Map)* | Directed map: arrows go from sender IP to receiver IP. Arrow thickness = bytes; hover shows packets and protocols seen. A slider picks how many of the busiest connections to draw. |
+| **Download Reports** | CSV of all packets and a PDF report. The PDF is tied to the capture it was made from, so an old PDF is never offered for a new upload. |
 
 ---
 
@@ -135,7 +136,7 @@ User uploads .pcap / .pcapng in app.py sidebar
 
 ## Exports
 
-- **CSV Export:** Available in *Packet Explorer* (filtered packets) and *Reports* (all packets). Contains 14 standard columns including timestamps, IPs, ports, protocols, flags, and packet info.
+- **CSV Export:** Available in *Browse Packets* (filtered packets) and *Download Reports* (all packets). Contains 14 standard columns including timestamps, IPs, ports, protocols, flags, and packet info.
 - **PDF Report:** Available in *Reports*. Generates a 6-section PDF document containing:
   1. Capture details and file statistics
   2. Protocol layer distribution tables

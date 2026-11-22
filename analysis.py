@@ -33,6 +33,49 @@ PROTOCOL_EXPLANATIONS = {
     "DHCP":   "Dynamic Host Configuration Protocol — automatically assigns IP addresses.",
 }
 
+# ── Plain-English names (one shared table used by every page) ─────────────────
+# protocol -> (friendly name, one-sentence description)
+# The technical name is always kept and shown next to the friendly name.
+
+PROTOCOL_INFO = {
+    "TCP":    ("Reliable Data Communication", "Delivers data in order and checks that it arrived. Used for web pages, email and file transfers."),
+    "UDP":    ("Faster Data Communication", "Sends data quickly without checking that it arrived. Used for lookups, video calls and games."),
+    "DNS":    ("Website Address Lookup", "Turns a name like google.com into an IP address."),
+    "TLS":    ("Encrypted Connection", "Scrambles data so others cannot read it (this is what HTTPS uses)."),
+    "HTTP":   ("Unencrypted Web Traffic", "Web traffic that is not encrypted, so it could be read on the network."),
+    "QUIC":   ("Fast Encrypted Web Traffic", "A newer encrypted way of loading web pages, used by browsers such as Chrome."),
+    "ICMP":   ("Network Connectivity Messages", "Error and test messages, such as the ones sent by the ping command."),
+    "ICMPv6": ("Network Connectivity Messages (IPv6)", "The IPv6 version of connectivity messages. Also used to find nearby devices."),
+    "ARP":    ("Finding Devices on a Local Network", "Asks which device owns an IP address on the local network."),
+    "IPv4":   ("Internet Addressing (Version 4)", "The older, most common IP address format, like 192.168.1.5."),
+    "IPv6":   ("Internet Addressing (Version 6)", "The newer, longer IP address format."),
+    "mDNS":   ("Local Name Lookup", "Devices on the same network find each other by name."),
+    "LLMNR":  ("Local Windows Name Lookup", "Windows computers find each other by name on a local network."),
+    "NBNS":   ("Older Windows Name Lookup", "An older way for Windows computers to find each other by name."),
+    "NTP":    ("Clock Synchronisation", "Keeps the clock of a device correct."),
+    "DHCP":   ("Automatic Address Assignment", "Gives a device its IP address when it joins a network."),
+    "No transport layer": ("No Transport Layer", "Packets that are not carried by TCP or UDP, such as ARP."),
+    "None identified":    ("No Specific Application Found", "Packets where NetScope could not tell which application sent them."),
+    "Other":  ("Other Traffic", "Packets of a type NetScope does not describe."),
+}
+
+
+def friendly_name(protocol):
+    """'TCP' -> 'Reliable Data Communication'. Unknown names are returned unchanged."""
+    return PROTOCOL_INFO.get(protocol, (protocol, ""))[0]
+
+
+def protocol_label(protocol):
+    """'TCP' -> 'Reliable Data Communication (TCP)'. The technical name is kept."""
+    name = friendly_name(protocol)
+    return protocol if name == protocol else f"{name} ({protocol})"
+
+
+def protocol_description(protocol):
+    """One short sentence explaining the protocol ('' if we have none)."""
+    return PROTOCOL_INFO.get(protocol, ("", ""))[1]
+
+
 # DNS response codes → plain English explanation
 DNS_RCODE_EXPLANATIONS = {
     "NOERROR":  "Success — the domain was found.",
@@ -66,6 +109,7 @@ def overview(df):
         "duration":   float(df["time"].max() - df["time"].min()),
         "unique_src": ip_df["src"].nunique(),
         "unique_dst": ip_df["dst"].nunique(),
+        "unique_ips": len(set(ip_df["src"]) | set(ip_df["dst"])),
         "start":      float(df["time"].min()),
         "end":        float(df["time"].max()),
     }
@@ -161,6 +205,44 @@ def conversations(df):
     ip_df["b"] = pairs.str[1]
     g = ip_df.groupby(["a", "b"]).agg(packets=("no", "count"), bytes=("length", "sum"))
     return g.sort_values("bytes", ascending=False).reset_index()
+
+
+def directed_flows(df):
+    """
+    One row per direction: Sender IP -> Receiver IP.
+    A -> B and B -> A are separate rows, so you can see who sent the data.
+    Columns: src, dst, packets, bytes, protocols (the protocols actually seen).
+    """
+    ip_df = df[df["network"].isin(["IPv4", "IPv6"]) & (df["src"] != df["dst"])]
+    if ip_df.empty:
+        return pd.DataFrame(columns=["src", "dst", "packets", "bytes", "protocols"])
+    g = ip_df.groupby(["src", "dst"]).agg(
+        packets=("no", "count"),
+        bytes=("length", "sum"),
+        protocols=("protocol", lambda s: ", ".join(sorted(set(s)))),
+    )
+    return g.sort_values("bytes", ascending=False).reset_index()
+
+
+def packet_detail(row):
+    """
+    Turn one packet row into (label, value) pairs for the detail panel.
+    Ports and TCP flags are only included when the packet has them.
+    """
+    seconds = pd.to_datetime(row["time"], unit="s", utc=True)
+    out = {
+        "Time (UTC)": seconds.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+        "Sender IP Address": row["src"],
+        "Receiver IP Address": row["dst"],
+        "Type of traffic": protocol_label(row["protocol"]),
+        "Packet size": f"{int(row['length']):,} bytes",
+    }
+    if pd.notna(row["sport"]):
+        out["Sender port"] = str(int(row["sport"]))
+        out["Receiver port"] = str(int(row["dport"]))
+    if row["tcp_flags"]:
+        out["TCP flags"] = row["tcp_flags"]
+    return out
 
 
 def traffic_over_time(df, buckets=60):
@@ -266,9 +348,9 @@ def narrative(df, dns, ov):
     top = trans.iloc[0] if not trans.empty else None
     if top is not None and top["protocol"] != "No transport layer":
         pct = top["percent"]
-        explanation = PROTOCOL_EXPLANATIONS.get(top["protocol"], "")
+        explanation = protocol_description(top["protocol"])
         sentences.append(
-            f"**{top['protocol']}** was the most common transport protocol "
+            f"**{protocol_label(top['protocol'])}** was the most common type of transport "
             f"({pct:.0f}% of packets). {explanation}"
         )
 
@@ -277,8 +359,8 @@ def narrative(df, dns, ov):
         q_count  = int((~dns["is_response"]).sum())
         domains  = dns[~dns["is_response"]]["qname"].nunique()
         sentences.append(
-            f"**{q_count} DNS queries** were made, looking up **{domains} unique domain names**. "
-            "DNS translates names like google.com into IP addresses."
+            f"**{q_count} website address lookups (DNS queries)** were made, for **{domains} different names**. "
+            "A lookup turns a name like google.com into an IP address."
         )
 
     # IPv4 vs IPv6
@@ -302,7 +384,7 @@ def narrative(df, dns, ov):
     http_count = int((df["app"] == "HTTP").sum())
     if http_count > 0:
         sentences.append(
-            f"⚠️ **{http_count:,} unencrypted HTTP packet(s)** were detected. "
+            f"**{http_count:,} unencrypted HTTP packet(s)** were detected. "
             "This traffic can be read by anyone on the same network path."
         )
 
