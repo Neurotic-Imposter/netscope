@@ -7,6 +7,8 @@ attacks. NetScope is not an intrusion detection system.
 
 import pandas as pd
 
+import analysis as A
+
 # How aggressive each rule is — change these numbers to adjust sensitivity.
 THRESHOLDS = {
     "window_s": 10,            # sliding time window for connection rules (seconds)
@@ -15,6 +17,9 @@ THRESHOLDS = {
     "port_scan_ports": 15,     # distinct destination ports probed on one host
     "dominant_share_pct": 50,  # share of all packet bytes from one source (%)
     "dns_repeat": 10,          # identical DNS queries (same name + same type)
+    "rst_count": 10,           # TCP reset (RST) packets from one source to one destination
+    "spike_factor": 8,         # busiest time bucket vs the average bucket
+    "spike_min_packets": 100,  # ...and at least this many packets in that bucket
 }
 
 CAVEAT = (
@@ -226,10 +231,65 @@ def dns_rule(dns):
     return alerts
 
 
+def reset_rule(df):
+    """Check for many TCP resets (RST) sent from one address to another."""
+    th = THRESHOLDS
+    tcp = df[df["transport"] == "TCP"]
+    rst = tcp[tcp["tcp_flags"].fillna("").str.contains("RST")]
+    alerts = []
+    for (src, dst), group in rst.groupby(["src", "dst"]):
+        if len(group) >= th["rst_count"]:
+            alerts.append(Alert(
+                rule="Repeated TCP resets",
+                severity="Low",
+                title="Potential repeated TCP resets",
+                evidence={
+                    "source": src,
+                    "destination": dst,
+                    "RST packets": len(group),
+                    "TCP packets between them": int(len(tcp[(tcp["src"] == src) & (tcp["dst"] == dst)])),
+                },
+                explanation=(
+                    f"{src} sent {len(group)} reset (RST) packets to {dst} "
+                    f"(threshold {th['rst_count']}). A reset ends a TCP connection abruptly. "
+                    "Closed ports, restarted programs and firewalls all cause resets."
+                ),
+            ))
+    return alerts
+
+
+def spike_rule(df):
+    """Check whether one short burst carried far more packets than the capture's average."""
+    th = THRESHOLDS
+    table, width = A.traffic_over_time(df)
+    if len(table) < 10:
+        return []   # too short to tell a spike from a normal burst
+    peak = table.loc[table["packets"].idxmax()]
+    mean = table["packets"].mean()
+    if peak["packets"] >= th["spike_min_packets"] and peak["packets"] >= th["spike_factor"] * mean:
+        return [Alert(
+            rule="Traffic spike",
+            severity="Info",
+            title="Potential traffic spike",
+            evidence={
+                "busiest period starts at (s)": int(peak["seconds"]),
+                "packets in that period": int(peak["packets"]),
+                "average per period": round(float(mean), 1),
+                "period length (s)": width,
+            },
+            explanation=(
+                f"{int(peak['packets']):,} packets arrived in one {width}-second period, "
+                f"about {peak['packets'] / mean:.0f}x the average ({mean:.1f})."
+            ),
+        )]
+    return []
+
+
 def run_all(df, dns):
     """Run all rules and return alerts sorted by severity (Medium first)."""
     severity_order = {"Medium": 0, "Low": 1, "Info": 2}
-    alerts = connection_rules(df) + dominant_source_rule(df) + dns_rule(dns)
+    alerts = (connection_rules(df) + dominant_source_rule(df) + dns_rule(dns)
+              + reset_rule(df) + spike_rule(df))
     return sorted(alerts, key=lambda a: severity_order[a.severity])
 
 
@@ -247,4 +307,8 @@ def rules_table():
          f"one source ≥{th['dominant_share_pct']}% of bytes (capturing PC excluded)"),
         ("Repeated DNS queries",
          f"same name+type ≥{th['dns_repeat']} times"),
+        ("Repeated TCP resets",
+         f"≥{th['rst_count']} RST packets from one source to one destination"),
+        ("Traffic spike",
+         f"busiest period ≥{th['spike_factor']}x the average and ≥{th['spike_min_packets']} packets"),
     ], columns=["Rule", "Fires when"])

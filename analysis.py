@@ -211,15 +211,17 @@ def directed_flows(df):
     """
     One row per direction: Sender IP -> Receiver IP.
     A -> B and B -> A are separate rows, so you can see who sent the data.
-    Columns: src, dst, packets, bytes, protocols (the protocols actually seen).
+    Columns: src, dst, packets, bytes, protocols (the protocols actually seen),
+    main_protocol (the protocol with the most packets in that direction).
     """
     ip_df = df[df["network"].isin(["IPv4", "IPv6"]) & (df["src"] != df["dst"])]
     if ip_df.empty:
-        return pd.DataFrame(columns=["src", "dst", "packets", "bytes", "protocols"])
+        return pd.DataFrame(columns=["src", "dst", "packets", "bytes", "protocols", "main_protocol"])
     g = ip_df.groupby(["src", "dst"]).agg(
         packets=("no", "count"),
         bytes=("length", "sum"),
         protocols=("protocol", lambda s: ", ".join(sorted(set(s)))),
+        main_protocol=("protocol", lambda s: s.value_counts().idxmax()),
     )
     return g.sort_values("bytes", ascending=False).reset_index()
 
@@ -271,6 +273,95 @@ def length_histogram(df, bin_size=100):
     out.columns = ["start", "packets"]
     out["range"] = out["start"].astype(str) + "–" + (out["start"] + bin_size - 1).astype(str)
     return out
+
+
+def ip_activity(df):
+    """
+    One row per IP address: packets and bytes it sent, packets and bytes it received,
+    and the totals. A packet counts once for its sender and once for its receiver,
+    so the totals of different rows must not be added together.
+    """
+    ip_df = df[df["network"].isin(["IPv4", "IPv6"])]
+    sent = ip_df.groupby("src").agg(packets_sent=("no", "count"), bytes_sent=("length", "sum"))
+    recv = ip_df.groupby("dst").agg(packets_received=("no", "count"), bytes_received=("length", "sum"))
+    out = sent.join(recv, how="outer").fillna(0).astype(int)
+    out["packets"] = out["packets_sent"] + out["packets_received"]
+    out["bytes"] = out["bytes_sent"] + out["bytes_received"]
+    out.index.name = "ip"
+    return out.sort_values(["packets", "bytes"], ascending=False).reset_index()
+
+
+def protocol_counts(df):
+    """
+    Packet counts for the protocols the Types of Traffic page explains.
+
+    These counts OVERLAP: a DNS packet is also a UDP packet and an HTTPS packet is
+    also a TCP packet. HTTPS is counted from TLS record headers (the content is
+    encrypted and is never read), so it is an estimate.
+    Returns a list of (protocol, packets, percent of all packets).
+    """
+    total = max(len(df), 1)
+    counts = {
+        "TCP":   int((df["transport"] == "TCP").sum()),
+        "UDP":   int((df["transport"] == "UDP").sum()),
+        "DNS":   int((df["app"] == "DNS").sum()),
+        "ARP":   int((df["network"] == "ARP").sum()),
+        "ICMP":  int((df["transport"] == "ICMP").sum()),
+        "HTTP":  int((df["app"] == "HTTP").sum()),
+        "HTTPS": int((df["app"] == "TLS").sum()),
+    }
+    return [(name, n, round(n / total * 100, 2)) for name, n in counts.items()]
+
+
+# ── Timing (only what the packet timestamps can really show) ─────────────────
+
+def tcp_handshakes(df):
+    """
+    Time between a TCP connection request (SYN) and the server's reply (SYN-ACK).
+
+    Only connections whose SYN and SYN-ACK are BOTH inside the capture can be
+    measured. Returns a table (client, server, port, ms), possibly empty.
+    """
+    cols = ["client", "server", "port", "ms"]
+    tcp = df[df["transport"] == "TCP"]
+    flags = tcp["tcp_flags"].fillna("")
+    syn = tcp[flags.str.contains("SYN") & ~flags.str.contains("ACK")]
+    synack = tcp[flags.str.contains("SYN") & flags.str.contains("ACK")]
+    if syn.empty or synack.empty:
+        return pd.DataFrame(columns=cols)
+    m = syn.merge(synack, left_on=["src", "dst", "sport", "dport"],
+                  right_on=["dst", "src", "dport", "sport"], suffixes=("_syn", "_ack"))
+    m["ms"] = (m["time_ack"] - m["time_syn"]) * 1000
+    m = m[m["ms"] >= 0].sort_values("ms").drop_duplicates("no_syn")
+    return pd.DataFrame({"client": m["src_syn"], "server": m["dst_syn"],
+                         "port": m["dport_syn"].astype(int), "ms": m["ms"]}).reset_index(drop=True)
+
+
+def tcp_indicators(df):
+    """Counts of TCP connection requests, how many got a reply in the capture, and resets (RST)."""
+    tcp = df[df["transport"] == "TCP"]
+    flags = tcp["tcp_flags"].fillna("")
+    syn_total = int((flags.str.contains("SYN") & ~flags.str.contains("ACK")).sum())
+    answered = len(tcp_handshakes(df))
+    return {"syn": syn_total, "answered": answered,
+            "unanswered": max(syn_total - answered, 0),
+            "resets": int(flags.str.contains("RST").sum())}
+
+
+def timing_summary(df):
+    """Gaps between packets and the busiest time bucket, all taken from packet timestamps."""
+    gaps = df["time"].sort_values().diff().dropna()
+    table, width = traffic_over_time(df)
+    peak = table.loc[table["packets"].idxmax()]
+    return {
+        "median_gap_ms": float(gaps.median() * 1000) if len(gaps) else None,
+        "longest_gap_s": float(gaps.max()) if len(gaps) else None,
+        "bucket_s": width,
+        "peak_packets": int(peak["packets"]),
+        "peak_at_s": int(peak["seconds"]),
+        "mean_packets": float(table["packets"].mean()),
+        "buckets": len(table),
+    }
 
 
 # ── DNS statistics ────────────────────────────────────────────────────────────

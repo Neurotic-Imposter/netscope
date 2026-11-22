@@ -97,3 +97,39 @@ def test_packet_detail_without_ports_has_no_port_or_flags(cap):
     row = cap.packets[cap.packets["transport"] == "ICMP"].iloc[0]
     d = A.packet_detail(row)
     assert "Sender port" not in d and "TCP flags" not in d
+
+
+# ---- helpers added for the dashboard redesign ----
+def test_protocol_counts_match_the_known_synthetic_capture(cap):
+    counts = {name: n for name, n, _ in A.protocol_counts(cap.packets)}
+    assert counts == {"TCP": 36, "UDP": 12, "DNS": 12, "ARP": 2, "ICMP": 5, "HTTP": 2, "HTTPS": 29}
+    # they overlap on purpose: DNS is inside UDP, so the sum is more than the 55 packets
+    assert sum(counts.values()) > len(cap.packets)
+
+def test_ip_activity_counts_each_direction(cap):
+    row = A.ip_activity(cap.packets).set_index("ip").loc["10.0.0.5"]
+    assert row["packets_sent"] == 22 + 6 + 5 and row["packets_received"] == 10 + 6
+
+def test_no_handshake_means_an_empty_table_not_zero_milliseconds(cap):
+    # the synthetic capture has a SYN but never a SYN-ACK
+    assert A.tcp_handshakes(cap.packets).empty
+    assert A.tcp_indicators(cap.packets)["answered"] == 0
+
+def test_handshake_time_comes_from_the_timestamps():
+    df = pd.DataFrame({
+        "no": [1, 2], "time": [10.0, 10.05], "transport": ["TCP", "TCP"],
+        "tcp_flags": ["SYN", "SYN,ACK"], "src": ["a", "b"], "dst": ["b", "a"],
+        "sport": [5000, 443], "dport": [443, 5000]})
+    h = A.tcp_handshakes(df)
+    assert len(h) == 1 and round(h["ms"].iloc[0]) == 50
+
+def test_reset_rule_needs_enough_resets():
+    import rules
+    base = {"transport": "TCP", "src": "a", "dst": "b", "tcp_flags": "RST"}
+    few = pd.DataFrame([base] * 9)
+    many = pd.DataFrame([base] * 10)
+    assert rules.reset_rule(few) == [] and len(rules.reset_rule(many)) == 1
+
+def test_spike_rule_ignores_short_or_flat_captures(cap):
+    import rules
+    assert rules.spike_rule(cap.packets) == []       # 55 evenly spaced packets

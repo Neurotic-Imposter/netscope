@@ -1,8 +1,13 @@
-# No "base" and no background/text colours on purpose:
-# Streamlit then follows the viewer's light or dark setting, and every
-# colour we do not set stays readable in both themes.
+# Dark-first theme. These values are the design tokens used by ui.py and charts.py.
 [theme]
-primaryColor = "#3987e5"
+base = "dark"
+primaryColor = "#056DFF"
+backgroundColor = "#0A0A0A"
+secondaryBackgroundColor = "#111111"
+textColor = "#EEEEEE"
+borderColor = "#262626"
+baseRadius = "0.5rem"
+font = "sans-serif"
 
 [server]
 maxUploadSize = 500
