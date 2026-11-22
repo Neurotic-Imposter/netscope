@@ -10,10 +10,10 @@ import pandas as pd
 import pytest
 from scapy.all import DNS, DNSQR, DNSRR, IP, TCP, UDP, Ether, wrpcap
 
-from core import analysis as A
-from core.parser import CaptureError, parse_capture
-from detectors import rules
-from reports.pdf_report import build_pdf
+import analysis as A
+from parser import CaptureError, parse_capture
+import rules
+from pdf_report import build_pdf
 
 REAL = os.path.join(os.path.dirname(__file__), "..", "captures", "netscope_first_capture.pcapng")
 
@@ -65,7 +65,7 @@ def _write(tmp_path, pkts, name="t.pcap"):
     return str(p)
 
 def _syn(src, dst, dport, t):
-    p = Ether() / IP(src=src, dst=dst) / TCP(sport=40000, dport=dport, flags="S")
+    p = Ether(src="00:11:22:33:44:55", dst="00:11:22:33:44:66") / IP(src=src, dst=dst) / TCP(sport=40000, dport=dport, flags="S")
     p.time = t
     return p
 
@@ -92,10 +92,10 @@ def test_normal_traffic_raises_no_alert(tmp_path):
 def test_repeated_dns_detected_and_parsed(tmp_path):
     pkts = []
     for i in range(12):
-        q = Ether() / IP(src="10.0.0.5", dst="10.0.0.1") / UDP(sport=5000 + i, dport=53) / \
+        q = Ether(src="00:11:22:33:44:55", dst="00:11:22:33:44:66") / IP(src="10.0.0.5", dst="10.0.0.1") / UDP(sport=5000 + i, dport=53) / \
             DNS(id=i, qd=DNSQR(qname="example.com", qtype="A"))
         q.time = 100 + i
-        r = Ether() / IP(src="10.0.0.1", dst="10.0.0.5") / UDP(sport=53, dport=5000 + i) / \
+        r = Ether(src="00:11:22:33:44:66", dst="00:11:22:33:44:55") / IP(src="10.0.0.1", dst="10.0.0.5") / UDP(sport=53, dport=5000 + i) / \
             DNS(id=i, qr=1, rcode=3, qd=DNSQR(qname="example.com", qtype="A"))
         r.time = 100.02 + i
         pkts += [q, r]
@@ -103,6 +103,21 @@ def test_repeated_dns_detected_and_parsed(tmp_path):
     s = A.dns_summary(cap.dns)
     assert s["queries"] == 12 and s["failed"] == 12 and s["unanswered"] == 0
     assert any("repeated DNS" in a.title for a in rules.run_all(cap.packets, cap.dns))
+
+
+def test_narrative_generates_factual_observations(real):
+    ov = A.overview(real.packets)
+    lines = A.narrative(real.packets, real.dns, ov)
+    assert len(lines) >= 3
+    assert any("2,794 packets" in l for l in lines)
+    assert any("TCP" in l for l in lines)
+    assert any("DNS" in l for l in lines)
+
+
+def test_label_port_names_known_ports():
+    assert A.label_port("443/tcp") == "443/tcp (HTTPS)"
+    assert A.label_port("53/udp") == "53/udp (DNS)"
+    assert A.label_port("55555/tcp") == "55555/tcp"
 
 
 # ---- error handling ----

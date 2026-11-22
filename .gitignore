@@ -1,6 +1,6 @@
 .venv/
 __pycache__/
 *.pyc
-captures/*.pcap
-captures/*.pcapng
+*.pcap
+*.pcapng
 .streamlit/secrets.toml
